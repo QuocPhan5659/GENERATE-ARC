@@ -44,10 +44,18 @@ let uploadedImageData: { data: string; mimeType: string } | null = null;
 let referenceImages: ReferenceImage[] = [];
 let loadedFilesContent: Record<string, string> = {};
 let selectedResolution = '1K';
+let imageCount = 1;
+let generatedImages: string[] = [];
+let currentImageIndex = 0;
 let cameraProjectionEnabled = false;
 let isGenerating = false;
 let abortController: AbortController | null = null;
 let currentProgressInterval: any = null;
+
+// --- Undo/Redo State ---
+let maskHistory: ImageData[] = [];
+let maskHistoryStep = -1;
+const MAX_HISTORY = 30;
 
 // --- Canvas Contexts ---
 let ctx: CanvasRenderingContext2D | null = null;
@@ -61,7 +69,7 @@ let zoomGuideCtx: CanvasRenderingContext2D | null = null;
 let isDrawing = false;
 let startX = 0;
 let startY = 0;
-let currentBrushSize = 50;
+let currentBrushSize = 30; // Reduced default size to 30
 let activeTool = 'brush';
 let lassoPoints: Array<{ x: number; y: number }> = [];
 
@@ -79,13 +87,22 @@ let isPanning = false;
 let panStartX = 0;
 let panStartY = 0;
 
+// --- Mouse Tracking for Shortcuts ---
+let globalMouseX = 0;
+let globalMouseY = 0;
+window.addEventListener('mousemove', (e) => {
+    globalMouseX = e.clientX;
+    globalMouseY = e.clientY;
+});
+
 // --- Initialization Logic ---
 // API Key handled via process.env.API_KEY OR Manual Input
 let manualApiKey = localStorage.getItem('manualApiKey') || '';
 
 const getGenAI = () => {
-    // Priority: Manual Key -> Environment Key
-    return new GoogleGenAI({ apiKey: manualApiKey || process.env.API_KEY });
+    // Priority: Manual Key -> Selected Key (API_KEY) -> Default Key (GEMINI_API_KEY)
+    const keyToUse = manualApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY;
+    return new GoogleGenAI({ apiKey: keyToUse });
 };
 
 // --- DOM Elements ---
@@ -104,6 +121,12 @@ const globalResetBtn = document.querySelector('#global-reset-btn') as HTMLButton
 const historyList = document.querySelector('#history-list') as HTMLDivElement;
 const miniGenerateBtn = document.querySelector('#mini-generate-btn') as HTMLButtonElement;
 
+// Image Count & Navigation
+const countBtns = document.querySelectorAll('.count-btn') as NodeListOf<HTMLButtonElement>;
+const prevImageBtn = document.querySelector('#prev-image-btn') as HTMLButtonElement;
+const nextImageBtn = document.querySelector('#next-image-btn') as HTMLButtonElement;
+const imageCounterBadge = document.querySelector('#image-counter-badge') as HTMLDivElement;
+
 // API Key UI Elements
 const apiKeyBtn = document.querySelector('#api-key-btn') as HTMLButtonElement;
 const apiKeyModal = document.querySelector('#api-key-modal') as HTMLDivElement;
@@ -115,7 +138,7 @@ const accountTierBadge = document.querySelector('#account-tier-badge') as HTMLDi
 // --- Helper Functions ---
 
 // Tier UI Update Function
-function updateAccountStatusUI() {
+async function updateAccountStatusUI() {
     if (!accountTierBadge) return;
     
     // Refresh from storage
@@ -123,7 +146,15 @@ function updateAccountStatusUI() {
     
     // Strict Check: Only show PRO/ULTRA if user has manually entered a key.
     // We ignore process.env.API_KEY for the visual badge to allow "Free" state visibility.
-    const isPro = manualApiKey && manualApiKey.length > 10;
+    let isPro = manualApiKey && manualApiKey.length > 10;
+    
+    if (!isPro && typeof window.aistudio !== 'undefined' && window.aistudio.hasSelectedApiKey) {
+        isPro = await window.aistudio.hasSelectedApiKey();
+    }
+    
+    if (!isPro && process.env.API_KEY && process.env.API_KEY.length > 10) {
+        isPro = true;
+    }
 
     // Clear previous styles
     accountTierBadge.className = '';
@@ -156,9 +187,12 @@ function updateAccountStatusUI() {
         }
         
         // Ensure click opens modal to allow switching/updating key
-        accountTierBadge.onclick = () => {
-             // Directly open our custom modal, ignoring AI Studio default
-             if (apiKeyModal) {
+        accountTierBadge.onclick = async () => {
+             if (typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
+                 await window.aistudio.openSelectKey();
+                 updateAccountStatusUI();
+             } else if (apiKeyModal) {
+                // Fallback to custom modal if not in AI Studio
                 manualApiKeyInput.value = manualApiKey; 
                 // Show Remove Key Button if Key exists
                 const removeBtn = document.getElementById('remove-key-btn');
@@ -179,9 +213,11 @@ function updateAccountStatusUI() {
             <span class="text-[10px] font-black tracking-[0.2em]">FREE</span>
         `;
         // Add click handler to open key modal for upgrade
-        accountTierBadge.onclick = () => {
-             // Directly open our custom modal, ignoring AI Studio default
-             if (apiKeyModal) {
+        accountTierBadge.onclick = async () => {
+             if (typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
+                 await window.aistudio.openSelectKey();
+                 updateAccountStatusUI();
+             } else if (apiKeyModal) {
                 manualApiKeyInput.value = manualApiKey; 
                 // Hide Remove Key Button if No Key
                 const removeBtn = document.getElementById('remove-key-btn');
@@ -321,6 +357,21 @@ if (apiKeyBtn) {
 const helpBtn = document.querySelector('#help-btn') as HTMLButtonElement;
 const helpModal = document.querySelector('#help-modal') as HTMLDivElement;
 const closeHelpBtn = document.querySelector('#close-help-btn') as HTMLButtonElement;
+
+// Add Listeners
+if (helpBtn && helpModal && closeHelpBtn) {
+    helpBtn.addEventListener('click', (e) => {
+        e.stopPropagation(); 
+        helpModal.classList.remove('hidden');
+    });
+    closeHelpBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        helpModal.classList.add('hidden');
+    });
+    helpModal.addEventListener('click', (e) => {
+        if (e.target === helpModal) helpModal.classList.add('hidden');
+    });
+}
 
 // Translation Buttons
 const langBtnVn = document.querySelector('#lang-btn-vn') as HTMLButtonElement;
@@ -504,6 +555,23 @@ async function translatePrompt(targetLang: 'VN' | 'EN') {
             if(lightEl && result.lighting) { lightEl.value = result.lighting; autoResize(lightEl); }
             if(sceneEl && result.scene) { sceneEl.value = result.scene; autoResize(sceneEl); }
             if(viewEl && result.view) { viewEl.value = result.view; autoResize(viewEl); }
+
+            // AUTO COPY TO CLIPBOARD
+            const combined = [
+                result.mega || '', 
+                result.lighting ? `Lighting: ${result.lighting}` : '', 
+                result.scene ? `Scene: ${result.scene}` : '', 
+                result.view ? `View: ${result.view}` : ''
+            ].filter(Boolean).join('\n');
+            
+            try {
+                await navigator.clipboard.writeText(combined);
+                if(statusEl) statusEl.innerText = "Translated & Copied to Clipboard!";
+            } catch (err) {
+                console.error("Auto copy failed", err);
+                if(statusEl) statusEl.innerText = "Translation Complete (Copy Failed)";
+            }
+
         }
     } catch (e: any) {
         console.error("Translation failed", e);
@@ -513,7 +581,6 @@ async function translatePrompt(targetLang: 'VN' | 'EN') {
         if(lightEl) lightEl.disabled = false;
         if(sceneEl) sceneEl.disabled = false;
         if(viewEl) viewEl.disabled = false;
-        if(statusEl) statusEl.innerText = "System Standby";
     }
 }
 
@@ -571,6 +638,23 @@ exportBtns.forEach(btn => {
             a.click();
             URL.revokeObjectURL(url);
         }
+    });
+});
+
+// --- Image Count Logic ---
+countBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+        const val = parseInt(btn.getAttribute('data-value') || '1');
+        imageCount = val;
+        
+        countBtns.forEach(b => {
+             b.classList.remove('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
+             b.classList.add('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
+        });
+        btn.classList.add('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
+        btn.classList.remove('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
+        
+        if (statusEl) statusEl.innerText = `Image Count: ${imageCount}`;
     });
 });
 
@@ -742,6 +826,47 @@ if (inpaintingPromptToggle && inpaintingPromptText) {
 
 // --- Main Image Handling ---
 
+// Undo/Redo Functions
+function saveMaskHistory() {
+    if (!ctx || !maskCanvas) return;
+    maskHistoryStep++;
+    // If we're not at the end of the array, discard the future states
+    if (maskHistoryStep < maskHistory.length) {
+         maskHistory.length = maskHistoryStep; 
+    }
+    maskHistory.push(ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height));
+    if (maskHistory.length > MAX_HISTORY) {
+        maskHistory.shift();
+        maskHistoryStep--;
+    }
+}
+
+function performUndo() {
+    if (maskHistoryStep > 0) {
+        maskHistoryStep--;
+        const imgData = maskHistory[maskHistoryStep];
+        ctx?.putImageData(imgData, 0, 0);
+        // Sync Zoom
+         if(zoomCtx && maskCanvas) {
+             zoomCtx.clearRect(0,0, zoomMaskCanvas.width, zoomMaskCanvas.height);
+             zoomCtx.drawImage(maskCanvas, 0, 0);
+        }
+    }
+}
+
+function performRedo() {
+    if (maskHistoryStep < maskHistory.length - 1) {
+        maskHistoryStep++;
+        const imgData = maskHistory[maskHistoryStep];
+        ctx?.putImageData(imgData, 0, 0);
+        // Sync Zoom
+         if(zoomCtx && maskCanvas) {
+             zoomCtx.clearRect(0,0, zoomMaskCanvas.width, zoomMaskCanvas.height);
+             zoomCtx.drawImage(maskCanvas, 0, 0);
+        }
+    }
+}
+
 function setupCanvas() {
     if (!maskCanvas || !guideCanvas || !uploadPreview) return;
     maskCanvas.width = uploadPreview.naturalWidth;
@@ -766,7 +891,16 @@ function setupCanvas() {
     zoomPreviewCtx = zoomPreviewCanvas?.getContext('2d') || null;
     zoomGuideCtx = zoomGuideCanvas?.getContext('2d') || null;
 
-    if(ctx) { ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = currentBrushSize; }
+    if(ctx) { 
+        ctx.lineCap = 'round'; 
+        ctx.lineJoin = 'round'; 
+        ctx.lineWidth = currentBrushSize; 
+        
+        // Reset History
+        maskHistory = [];
+        maskHistoryStep = -1;
+        saveMaskHistory(); // Save initial blank state
+    }
     
     // Sync Zoom Mask with Main Mask (Initial)
     if(zoomCtx) zoomCtx.drawImage(maskCanvas, 0, 0);
@@ -877,6 +1011,10 @@ function resetImage() {
     guideCanvas?.getContext('2d')?.clearRect(0,0,guideCanvas.width,guideCanvas.height);
     zoomMaskCanvas?.getContext('2d')?.clearRect(0,0,zoomMaskCanvas.width,zoomMaskCanvas.height);
     imageInput.value = '';
+    
+    // Reset History
+    maskHistory = [];
+    maskHistoryStep = -1;
 }
 removeImageBtn?.addEventListener('click', (e) => { e.stopPropagation(); resetImage(); });
 removeImageOverlayBtn?.addEventListener('click', (e) => { e.stopPropagation(); resetImage(); });
@@ -1201,10 +1339,22 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
 
 // --- Keyboard Shortcuts ---
 document.addEventListener('keydown', (e) => {
+    // Undo/Redo Shortcuts
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        performUndo();
+        return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        performRedo();
+        return;
+    }
+
     // Priority check for Generate shortcut (Ctrl+Enter)
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
-        runGeneration();
+        document.getElementById('generate-button')?.click();
         return;
     }
 
@@ -1219,6 +1369,29 @@ document.addEventListener('keydown', (e) => {
         return;
     }
 
+    // Brush Size Shortcuts [ and ]
+    if (e.key === '[' || e.key === ']') {
+        const step = 5;
+        if (e.key === '[') currentBrushSize = Math.max(5, currentBrushSize - step);
+        else currentBrushSize = Math.min(150, currentBrushSize + step);
+
+        if (brushSlider) brushSlider.value = currentBrushSize.toString();
+        if (brushSizeVal) brushSizeVal.innerText = `${currentBrushSize}px`;
+        if (zoomBrushSizeSlider) zoomBrushSizeSlider.value = currentBrushSize.toString();
+        if (zoomBrushSizeVal) zoomBrushSizeVal.innerText = `${currentBrushSize}px`;
+        if (ctx) ctx.lineWidth = currentBrushSize;
+        
+        // Auto-center visual cursor
+        const brushCursor = document.getElementById('brush-cursor');
+        if(brushCursor) {
+            brushCursor.style.width = `${currentBrushSize}px`;
+            brushCursor.style.height = `${currentBrushSize}px`;
+            brushCursor.style.left = `${globalMouseX - (currentBrushSize / 2)}px`;
+            brushCursor.style.top = `${globalMouseY - (currentBrushSize / 2)}px`;
+        }
+        return;
+    }
+
     switch(e.key.toLowerCase()) {
         case 'b': document.getElementById('tool-brush')?.click(); break;
         case 'e': document.getElementById('tool-eraser')?.click(); break;
@@ -1228,6 +1401,7 @@ document.addEventListener('keydown', (e) => {
         case 'o': document.getElementById('tool-ellipse')?.click(); break; // O for Ellipse/Oval
         case 'x': document.getElementById('clear-mask')?.click(); break; // Reset
         case 'u': document.getElementById('paste-image-btn')?.click(); break; // Paste Image Shortcut
+        case 'v': document.getElementById('paste-png-info-btn')?.click(); break; // Paste PNG Info Shortcut
         case 's': document.getElementById('screenshot-btn')?.click(); break; // Screenshot Shortcut
     }
 });
@@ -1249,7 +1423,7 @@ function renderRefs() {
 
     referenceImages.forEach((img, index) => {
         const div = document.createElement('div');
-        div.className = 'relative w-16 h-16 group shrink-0';
+        div.className = 'relative w-12 h-12 group shrink-0';
         const imageEl = document.createElement('img');
         imageEl.src = `data:${img.mimeType};base64,${img.data}`;
         imageEl.className = 'w-full h-full object-cover rounded border border-gray-600';
@@ -1277,6 +1451,23 @@ if (referenceDropZone) {
     referenceDropZone.addEventListener('dragleave', (e) => { e.preventDefault(); e.stopPropagation(); referenceDropZone.classList.remove('border-[#262380]'); });
     referenceDropZone.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); referenceDropZone.classList.remove('border-[#262380]'); if (e.dataTransfer?.files) handleRefFiles(e.dataTransfer.files); });
     referenceDropZone.addEventListener('click', (e) => { if(!(e.target as HTMLElement).closest('button')) referenceInput?.click(); });
+    
+    // Allow Paste directly into this zone by focusing it
+    referenceDropZone.setAttribute('tabindex', '0');
+    referenceDropZone.addEventListener('paste', async (e) => {
+         e.preventDefault();
+         const items = e.clipboardData?.items;
+         if (items) {
+             const dt = new DataTransfer();
+             for (let i = 0; i < items.length; i++) {
+                 if (items[i].type.startsWith('image/')) {
+                     const file = items[i].getAsFile();
+                     if (file) dt.items.add(file);
+                 }
+             }
+             if (dt.files.length > 0) handleRefFiles(dt.files);
+         }
+    });
 }
 referenceInput?.addEventListener('change', () => { if(referenceInput.files) { handleRefFiles(referenceInput.files); referenceInput.value = ''; } });
 clearAllRefsBtn?.addEventListener('click', (e) => { e.stopPropagation(); referenceImages = []; renderRefs(); });
@@ -1417,8 +1608,8 @@ manualCtxEntries.forEach((el) => {
 
 // --- Canvas Drawing & Cursor ---
 
-const pencilIcon = `<svg xmlns="http://www.w3.org/2000/svg" class="h-2/3 w-2/3 text-white drop-shadow-md" fill="currentColor" viewBox="0 0 24 24"><path d="M14.083 2.506a2.898 2.898 0 014.09 4.089l-9.605 9.603-4.326.865.867-4.326 9.605-9.604-.63-.627zM16.902 8.01l-1.258-1.259 1.258 1.259zm-10.74 8.35l.432 2.155 2.154-.431-2.586-1.724z" /></svg>`;
-const dotIcon = `<svg xmlns="http://www.w3.org/2000/svg" class="h-2/3 w-2/3 text-white drop-shadow-md" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg>`;
+const pencilIcon = `<svg xmlns="http://www.w3.org/2000/svg" class="h-[10%] w-[10%] text-white drop-shadow-md" fill="currentColor" viewBox="0 0 24 24"><path d="M14.083 2.506a2.898 2.898 0 014.09 4.089l-9.605 9.603-4.326.865.867-4.326 9.605-9.604-.63-.627zM16.902 8.01l-1.258-1.259 1.258 1.259zm-10.74 8.35l.432 2.155 2.154-.431-2.586-1.724z" /></svg>`;
+const dotIcon = `<svg xmlns="http://www.w3.org/2000/svg" class="h-[10%] w-[10%] text-white drop-shadow-md" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg>`;
 const circleIcon = `<div class="w-full h-full rounded-full border-2 border-white/80"></div>`; // Simplified for default
 
 function updateBrushCursor(e: MouseEvent) {
@@ -1624,6 +1815,9 @@ function stopDrawing(e: MouseEvent, targetCanvas: HTMLCanvasElement) {
              zoomCtx.drawImage(maskCanvas, 0, 0);
         }
     }
+    
+    // Save history after any drawing operation
+    saveMaskHistory();
 }
 
 // Attach listeners
@@ -1739,17 +1933,16 @@ async function runGeneration() {
     let isPro = false;
     
     // Check AI Studio environment for Key Selection (Login status)
-    if (typeof window.aistudio !== 'undefined' && window.aistudio.hasSelectedApiKey) {
-        // In AI Studio, check if user selected a key
-        isPro = await window.aistudio.hasSelectedApiKey();
-    } else {
-        // Local Dev / Outside AI Studio: 
-        // If Manual API Key is present, assume Pro (User-provided key)
-        if (manualApiKey && manualApiKey.length > 10) {
-            isPro = true;
-        } else {
-            isPro = false; 
-        }
+    const hasSelectedKey = typeof window.aistudio !== 'undefined' && await window.aistudio.hasSelectedApiKey();
+    
+    // Strict Pro Check: Must have ACTUAL key content, not just the flag
+    if (hasSelectedKey && process.env.API_KEY && process.env.API_KEY.length > 10) {
+        isPro = true;
+    }
+    
+    // Override: If Manual API Key is present, treat as Pro regardless of environment
+    if (manualApiKey && manualApiKey.length > 10) {
+        isPro = true;
     }
     
     // Update Badge UI just in case it wasn't refreshed
@@ -1761,44 +1954,67 @@ async function runGeneration() {
         aspectRatio: sizeSelect.value || '1:1' 
     };
 
-    if (isPro) {
-        // --- PRO / ULTRA TIER ---
-        // Unlocks Gemini 3.0 Pro Image Model
-        // Supports 1K, 2K, 4K
-        modelId = 'gemini-3-pro-image-preview';
+    // --- MANUAL MODEL SELECTION ---
+    const modelSelect = document.querySelector('#model-select') as HTMLSelectElement;
+    const selectedModel = modelSelect?.value || 'auto';
+
+    if (selectedModel !== 'auto') {
+        // User manually selected a model
+        modelId = selectedModel;
         
-        // Pass resolution to imageConfig
-        imageConfig.imageSize = selectedResolution; 
-        
-        if(statusEl) statusEl.innerText = `Generating with Gemini 3.0 Pro (${selectedResolution})...`;
-    } else {
-        // --- FREE TIER ---
-        // Restricted to Gemini 1.5 (2.5 Flash Image)
-        // Restricted to 1K resolution
-        modelId = 'gemini-2.5-flash-image';
-        
-        // Enforce 1K limit
-        if (selectedResolution !== '1K') {
-            selectedResolution = '1K';
-            
-            // Visual Update for Resolution Buttons
-            resBtns.forEach(b => {
-                if(b.getAttribute('data-value') === '1K') {
-                    b.classList.add('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
-                    b.classList.remove('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
-                } else {
-                    b.classList.remove('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
-                    b.classList.add('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
-                }
-            });
-            // Alert user about downgrade
-            alert("Tài khoản Free chỉ hỗ trợ độ phân giải 1K. Đã tự động chuyển về Model 1.5 Free (Flash Image). Đăng nhập API Key Pro để mở khóa 2K/4K.");
+        // If Pro model selected, enforce Pro checks
+        if (modelId === 'gemini-3-pro-image-preview') {
+             if (!isPro) {
+                 console.warn("User selected Pro model but no valid Pro key detected. Attempting anyway (will fallback if fails).");
+             }
+             imageConfig.imageSize = selectedResolution;
+             if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (${selectedResolution})...`;
+        } else {
+             // Flash
+             delete imageConfig.imageSize;
+             if(statusEl) statusEl.innerText = "Generating with Gemini 2.5 Flash...";
         }
-        
-        // Flash Image model does not support imageSize param
-        delete imageConfig.imageSize;
-        
-        if(statusEl) statusEl.innerText = "Generating with Model 1.5 Free (1K)...";
+    } else {
+        // --- AUTO MODE (Original Logic) ---
+        if (isPro) {
+            // --- PRO / ULTRA TIER ---
+            // Unlocks Gemini 3.0 Pro Image Model
+            // Supports 1K, 2K, 4K
+            modelId = 'gemini-3-pro-image-preview';
+            
+            // Pass resolution to imageConfig
+            imageConfig.imageSize = selectedResolution; 
+            
+            if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (Auto) (${selectedResolution})...`;
+        } else {
+            // --- FREE TIER ---
+            // Restricted to Gemini 1.5 (2.5 Flash Image)
+            // Restricted to 1K resolution
+            modelId = 'gemini-2.5-flash-image';
+            
+            // Enforce 1K limit
+            if (selectedResolution !== '1K') {
+                selectedResolution = '1K';
+                
+                // Visual Update for Resolution Buttons
+                resBtns.forEach(b => {
+                    if(b.getAttribute('data-value') === '1K') {
+                        b.classList.add('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
+                        b.classList.remove('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
+                    } else {
+                        b.classList.remove('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
+                        b.classList.add('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
+                    }
+                });
+                // Alert user about downgrade
+                // alert("Tài khoản Free chỉ hỗ trợ độ phân giải 1K. Đã tự động chuyển về Model 1.5 Free (Flash Image). Đăng nhập API Key Pro để mở khóa 2K/4K.");
+            }
+            
+            // Flash Image model does not support imageSize param
+            delete imageConfig.imageSize;
+            
+            if(statusEl) statusEl.innerText = "Generating with Model 1.5 Free (1K)...";
+        }
     }
 
     isGenerating = true; abortController = new AbortController(); 
@@ -1839,34 +2055,161 @@ async function runGeneration() {
         parts.push({ text: fullPrompt });
 
         // Use local Helper (SDK Client)
-        const ai = getGenAI();
-
-        const result = await ai.models.generateContent({ model: modelId, contents: { parts: parts }, config: { imageConfig: imageConfig } });
+        // FIX: Prioritize AI Studio Selected Key over Manual Key if it exists
+        let finalApiKey = manualApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY;
         
-        if (abortController.signal.aborted) return;
+        if (typeof window.aistudio !== 'undefined' && window.aistudio.hasSelectedApiKey) {
+            const hasSelected = await window.aistudio.hasSelectedApiKey();
+            if (hasSelected && process.env.API_KEY) {
+                console.log("Using AI Studio Selected Key");
+                finalApiKey = process.env.API_KEY;
+            }
+        }
         
-        // Success - Set 100% immediately
-        clearInterval(currentProgressInterval); 
-        generateProgress.style.width = '100%'; 
-        generateLabel.innerText = "STOP GENERATING (100%)";
+        const ai = new GoogleGenAI({ apiKey: finalApiKey });
 
-        const cand = result.candidates?.[0];
-        if (cand) {
-            for (const part of cand.content.parts) {
-                if (part.inlineData) {
-                    const promptData: PromptData = { mega: p, lighting: l, scene: s, view: v, inpaint: i, inpaintEnabled: inpaintingPromptToggle.checked, cameraProjection: cameraProjectionEnabled };
-                    try {
-                        const pngBase64 = await convertToPngBase64(part.inlineData.data, part.inlineData.mimeType);
-                        const finalBase64 = await embedMetadata(pngBase64, promptData);
-                        const src = `data:image/png;base64,${finalBase64}`;
-                        outputImage.src = src; outputContainer.classList.remove('hidden'); addToHistory(src, promptData);
-                    } catch (err) {
-                        console.error("Image processing error", err);
-                        outputImage.src = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                        outputContainer.classList.remove('hidden');
+        const processResults = async (results: any[]) => {
+             generatedImages = []; // Clear previous
+             for (const result of results) {
+                const cand = result.candidates?.[0];
+                if (cand) {
+                    for (const part of cand.content.parts) {
+                        if (part.inlineData) {
+                            const promptData: PromptData = { mega: p, lighting: l, scene: s, view: v, inpaint: i, inpaintEnabled: inpaintingPromptToggle.checked, cameraProjection: cameraProjectionEnabled };
+                            try {
+                                const pngBase64 = await convertToPngBase64(part.inlineData.data, part.inlineData.mimeType);
+                                const finalBase64 = await embedMetadata(pngBase64, promptData);
+                                const src = `data:image/png;base64,${finalBase64}`;
+                                generatedImages.push(src);
+                                addToHistory(src, promptData);
+                            } catch (err) {
+                                console.error("Image processing error", err);
+                                const src = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                                generatedImages.push(src);
+                            }
+                        }
                     }
                 }
             }
+            if (generatedImages.length > 0) {
+                outputContainer.classList.remove('hidden');
+                showImage(0);
+            }
+        };
+
+        try {
+            // 1. Hàm tạo thời gian nghỉ (Sleep) để chống lỗi 429
+            const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+            // 2. Chạy vòng lặp tuần tự thay vì song song
+            const results = [];
+            for (let k = 0; k < imageCount; k++) {
+                if (!abortController || abortController.signal.aborted) break;
+
+                if(statusEl) statusEl.innerText = `Đang tạo ảnh ${k + 1} / ${imageCount}...`;
+
+                try {
+                    // Gọi API tạo từng ảnh một
+                    const result = await ai.models.generateContent({ 
+                        model: modelId, 
+                        contents: { parts: parts }, 
+                        config: { imageConfig: imageConfig } 
+                    });
+                    results.push(result);
+
+                    // Nếu tạo thành công 1 ảnh, cập nhật thanh tiến trình thật
+                    const realProgress = Math.floor(((k + 1) / imageCount) * 95);
+                    generateProgress.style.width = `${realProgress}%`;
+                    generateLabel.innerText = `STOP GENERATING (${realProgress}%)`;
+
+                    // NGHỈ 3 GIÂY GIỮA CÁC LẦN GỌI ĐỂ BẢO VỆ API KEY (Trừ ảnh cuối cùng)
+                    if (k < imageCount - 1) {
+                        if(statusEl) statusEl.innerText = `Đang làm mát API (chờ 3 giây)...`;
+                        await sleep(3000); 
+                    }
+
+                } catch (imgErr: any) {
+                    const errMsg = imgErr.message || JSON.stringify(imgErr);
+
+                    // Rethrow 403/404 to trigger outer fallback logic
+                    if (errMsg.includes("403") || errMsg.includes("404") || errMsg.includes("PERMISSION_DENIED")) {
+                        // Suppress console error for expected 403s that we handle
+                        // console.warn("Permission denied (403), triggering fallback...");
+                        throw new Error("403 PERMISSION_DENIED");
+                    }
+                    
+                    console.error(`Lỗi ở ảnh thứ ${k + 1}:`, imgErr);
+
+                    // Nếu bị lỗi ở 1 ảnh, báo lỗi nhưng KHÔNG làm sập toàn bộ app
+                    if (errMsg.includes("429")) {
+                        alert(`Đã chạm trần giới hạn API ở ảnh thứ ${k + 1}. Đang dừng lại để bảo vệ tài khoản.`);
+                        break; // Dừng vòng lặp ngay lập tức
+                    }
+                    
+                    // Throw other errors to outer catch
+                    throw imgErr;
+                }
+            }
+            
+            if (!abortController || abortController.signal.aborted) return;
+            
+            // Stop fake progress and set to 100%
+            clearInterval(currentProgressInterval);
+            generateProgress.style.width = '100%'; 
+            generateLabel.innerText = "STOP GENERATING (100%)";
+
+            await processResults(results);
+
+        } catch (e: any) {
+            const errStr = e.message || JSON.stringify(e);
+            
+            // FALLBACK LOGIC for Pro Model 403/404
+            if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED")) && modelId === 'gemini-3-pro-image-preview') {
+                 
+                 // If manually selected, we still fallback but notify user
+                 if (selectedModel === 'gemini-3-pro-image-preview') {
+                     console.warn("Manual Pro selection failed (403). Falling back to Flash.");
+                     // Non-blocking notification via status text instead of Alert
+                     if(statusEl) statusEl.innerText = "Lỗi quyền Pro (403). Đang chuyển sang Flash (1K)...";
+                 } else {
+                     console.warn("Auto Pro selection failed (403). Falling back to Flash.");
+                     if(statusEl) statusEl.innerText = "Pro Model failed. Falling back to Flash (1K)...";
+                 }
+                 
+                 try {
+                     const fallbackModelId = 'gemini-2.5-flash-image';
+                     const fallbackConfig = { ...imageConfig };
+                     delete fallbackConfig.imageSize; // Flash doesn't support imageSize
+                     
+                     // Use sequential loop for fallback too
+                     const fallbackResults = [];
+                     for (let k = 0; k < imageCount; k++) {
+                        if (!abortController || abortController.signal.aborted) break;
+                        
+                        fallbackResults.push(await ai.models.generateContent({ 
+                            model: fallbackModelId, 
+                            contents: { parts: parts }, 
+                            config: { imageConfig: fallbackConfig } 
+                        }));
+                     }
+                     
+                     if (!abortController || abortController.signal.aborted) return;
+
+                     clearInterval(currentProgressInterval); 
+                     generateProgress.style.width = '100%'; 
+                     generateLabel.innerText = "STOP GENERATING (100%)";
+                     
+                     await processResults(fallbackResults);
+                     
+                     alert("Lưu ý: API Key của bạn không hỗ trợ Model Pro (2K/4K) hoặc Model chưa được kích hoạt. Hệ thống đã tự động chuyển về Model Flash (1K).");
+                     return; // Success after fallback
+
+                 } catch (fallbackErr: any) {
+                     console.error("Fallback failed", fallbackErr);
+                     throw fallbackErr; // Throw to outer catch to handle generic error
+                 }
+            }
+            throw e; // Re-throw if not handled by fallback
         }
     } catch (e: any) { 
         if (!abortController?.signal.aborted) { 
@@ -1875,7 +2218,6 @@ async function runGeneration() {
             if (e.message.includes("429")) {
                 alert("API Quota exceeded. Please try again later.");
             } else if (e.message.includes("401") || e.message.includes("403")) {
-                // Permission error
                 alert(`API Error: ${e.message}. Check your API Key and billing.`);
             } else {
                 alert(`Generation failed: ${e.message}`);
@@ -1904,6 +2246,32 @@ async function runGeneration() {
 
 generateButton?.addEventListener('click', runGeneration);
 miniGenerateBtn?.addEventListener('click', runGeneration);
+
+function showImage(index: number) {
+    if (index < 0 || index >= generatedImages.length) return;
+    currentImageIndex = index;
+    outputImage.src = generatedImages[index];
+    
+    // Update Badge
+    if (imageCounterBadge) {
+        imageCounterBadge.innerText = `${currentImageIndex + 1} / ${generatedImages.length}`;
+        if (generatedImages.length > 1) imageCounterBadge.classList.remove('hidden');
+        else imageCounterBadge.classList.add('hidden');
+    }
+
+    // Update Buttons
+    if (prevImageBtn) {
+        if (currentImageIndex > 0) prevImageBtn.classList.remove('hidden');
+        else prevImageBtn.classList.add('hidden');
+    }
+    if (nextImageBtn) {
+        if (currentImageIndex < generatedImages.length - 1) nextImageBtn.classList.remove('hidden');
+        else nextImageBtn.classList.add('hidden');
+    }
+}
+
+if (prevImageBtn) prevImageBtn.addEventListener('click', () => showImage(currentImageIndex - 1));
+if (nextImageBtn) nextImageBtn.addEventListener('click', () => showImage(currentImageIndex + 1));
 
 closeOutputBtn?.addEventListener('click', () => { outputContainer.classList.add('hidden'); });
 downloadButtonMain?.addEventListener('click', () => { if (outputImage.src) { const a = document.createElement('a'); a.href = outputImage.src; a.download = `banana-pro-${Date.now()}.png`; a.click(); } });
@@ -1948,6 +2316,9 @@ globalResetBtn?.addEventListener('click', () => {
 if (clearMaskBtn) clearMaskBtn.addEventListener('click', () => { 
     ctx?.clearRect(0, 0, maskCanvas.width, maskCanvas.height); 
     zoomCtx?.clearRect(0, 0, zoomMaskCanvas.width, zoomMaskCanvas.height); 
+    
+    // Save history after clear
+    saveMaskHistory();
 });
 if (toolbarClearBtn) toolbarClearBtn.addEventListener('click', () => clearMaskBtn.click());
 document.getElementById('clear-arrows-btn')?.addEventListener('click', () => {
