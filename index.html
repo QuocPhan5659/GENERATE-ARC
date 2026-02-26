@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Banana Pro Studio - Professional AI Suite</title>
-    <script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1771993042673&amp;type=content-script&amp;dmn=aistudio.google.com&amp;url=https%3A%2F%2Faistudio.google.com%2F_%2Fupload%2F325d93db-f1f5-4cce-9e37-24943aac20f0%2Ffile%2F68e6bda42ec96f52c10acb92d4fb87e0ca432181f06e237e75b1229c74b43b98&amp;app=msedge.exe&amp;css=3&amp;js=1&amp;rel=1&amp;rji=1&amp;sbe=0"></script><script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1771993042673&amp;name=AdGuard%20Extra&amp;type=user-script"></script><script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -181,7 +181,13 @@
             </a>
         </div>
       </div>
-      <div id="status" class="text-[9px] font-black uppercase tracking-widest text-amber-500 bg-amber-500/10 px-3 py-1.5 rounded-lg border border-amber-500/20 shadow-[0_0_10px_rgba(245,158,11,0.1)] transition-all duration-300">System Standby</div>
+      <div class="flex items-center gap-3">
+          <div id="cost-display" class="hidden md:flex items-center gap-1.5 px-3 py-1.5 bg-[#121214] border border-white/5 rounded-lg">
+              <span class="text-[9px] font-black uppercase tracking-widest text-gray-500">Total Cost:</span>
+              <span id="total-cost-val" class="text-[9px] font-black text-emerald-400">$0.000</span>
+          </div>
+          <div id="status" class="text-[9px] font-black uppercase tracking-widest text-amber-500 bg-amber-500/10 px-3 py-1.5 rounded-lg border border-amber-500/20 shadow-[0_0_10px_rgba(245,158,11,0.1)] transition-all duration-300">System Standby</div>
+      </div>
     </header>
 
     <!-- MAIN GRID LAYOUT -->

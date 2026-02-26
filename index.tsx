@@ -127,6 +127,26 @@ const prevImageBtn = document.querySelector('#prev-image-btn') as HTMLButtonElem
 const nextImageBtn = document.querySelector('#next-image-btn') as HTMLButtonElement;
 const imageCounterBadge = document.querySelector('#image-counter-badge') as HTMLDivElement;
 
+// Cost Tracking
+const costDisplayEl = document.querySelector('#cost-display') as HTMLDivElement;
+const totalCostValEl = document.querySelector('#total-cost-val') as HTMLSpanElement;
+let totalUsageCost = parseFloat(localStorage.getItem('banana_usage_cost') || '0');
+
+const updateCostDisplay = (addedCost: number = 0) => {
+    totalUsageCost += addedCost;
+    localStorage.setItem('banana_usage_cost', totalUsageCost.toFixed(5));
+    if (totalCostValEl) {
+        totalCostValEl.innerText = `$${totalUsageCost.toFixed(4)}`;
+    }
+    if (costDisplayEl) {
+        costDisplayEl.classList.remove('hidden');
+        costDisplayEl.classList.add('flex');
+    }
+};
+
+// Initialize Cost Display
+updateCostDisplay(0);
+
 // API Key UI Elements
 const apiKeyBtn = document.querySelector('#api-key-btn') as HTMLButtonElement;
 const apiKeyModal = document.querySelector('#api-key-modal') as HTMLDivElement;
@@ -978,12 +998,12 @@ if (pasteImageBtn) {
         e.stopPropagation();
         e.preventDefault();
         try {
+            // Try standard API first
             const clipboardItems = await navigator.clipboard.read();
             let foundImage = false;
             for (const item of clipboardItems) {
                 const imageTypes = item.types.filter(type => type.startsWith('image/'));
                 if (imageTypes.length > 0) {
-                    // Get the first image type available
                     const blob = await item.getType(imageTypes[0]);
                     const file = new File([blob], "pasted_image.png", { type: imageTypes[0] });
                     handleMainImage(file);
@@ -992,14 +1012,45 @@ if (pasteImageBtn) {
                 }
             }
             if (!foundImage) {
+                // If no image found via API, try text fallback or warn
                 alert("Không tìm thấy hình ảnh trong bộ nhớ đệm (Clipboard)!");
             }
         } catch (err) {
-            console.error('Paste failed:', err);
-            alert("Lỗi: Không thể truy cập bộ nhớ đệm. Hãy đảm bảo bạn đã cấp quyền hoặc đang sử dụng trình duyệt hỗ trợ.");
+            console.error('Paste API failed:', err);
+            // Fallback: Prompt user to use Ctrl+V
+            alert("Trình duyệt chặn truy cập Clipboard trực tiếp. Vui lòng nhấn phím tắt Ctrl+V (hoặc Cmd+V) để dán ảnh.");
         }
     });
 }
+
+// Global Paste Handler (Best for Plugins/Restricted Envs)
+document.addEventListener('paste', (e) => {
+    // If user is pasting into a specific input, let it handle it (unless it's an image)
+    const target = e.target as HTMLElement;
+    const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+    
+    if (e.clipboardData && e.clipboardData.items) {
+        const items = e.clipboardData.items;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf('image') !== -1) {
+                // It's an image! Handle it regardless of focus
+                const blob = items[i].getAsFile();
+                if (blob) {
+                    e.preventDefault(); // Stop it from pasting into text inputs if it's an image
+                    handleMainImage(blob);
+                    if(statusEl) {
+                        statusEl.innerText = "Image Pasted from Clipboard";
+                        setTimeout(() => statusEl.innerText = "System Standby", 2000);
+                    }
+                }
+                return;
+            }
+        }
+    }
+    
+    // If not image, and not in input, maybe handle text paste for specific logic?
+    // For now, let default text paste happen if in input.
+});
 
 function resetImage() {
     uploadedImageData = null;
@@ -1022,6 +1073,12 @@ removeImageOverlayBtn?.addEventListener('click', (e) => { e.stopPropagation(); r
 // --- Screenshot Logic ---
 
 async function captureScreen() {
+    // Check if API is supported
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        alert("Chức năng chụp màn hình không được hỗ trợ trong môi trường này (Plugin/Webview). Vui lòng sử dụng công cụ chụp màn hình của hệ điều hành (Snipping Tool) và dán ảnh vào đây (Ctrl+V).");
+        return;
+    }
+
     try {
         // Fix: Cast video constraints to 'any' to allow 'cursor' property which is not in standard MediaTrackConstraints definition yet
         const stream = await navigator.mediaDevices.getDisplayMedia({ 
@@ -2117,6 +2174,11 @@ async function runGeneration() {
                     });
                     results.push(result);
 
+                    // Update Cost
+                    // Estimate: Pro = $0.04, Flash = $0.004
+                    const costPerImg = modelId.includes('pro') ? 0.04 : 0.004;
+                    updateCostDisplay(costPerImg);
+
                     // Nếu tạo thành công 1 ảnh, cập nhật thanh tiến trình thật
                     const realProgress = Math.floor(((k + 1) / imageCount) * 95);
                     generateProgress.style.width = `${realProgress}%`;
@@ -2191,6 +2253,9 @@ async function runGeneration() {
                             contents: { parts: parts }, 
                             config: { imageConfig: fallbackConfig } 
                         }));
+                        
+                        // Update Cost for Fallback (Flash)
+                        updateCostDisplay(0.004);
                      }
                      
                      if (!abortController || abortController.signal.aborted) return;
