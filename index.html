@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Banana Pro Studio - Professional AI Suite</title>
-    <script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772162622885&amp;type=content-script&amp;dmn=aistudio.google.com&amp;url=https%3A%2F%2Faistudio.google.com%2F_%2Fupload%2F325d93db-f1f5-4cce-9e37-24943aac20f0%2Ffile%2F9fae4cd064504e05c7377d07b9f1f8750969ff958d339870debb354706068b6f&amp;app=msedge.exe&amp;css=3&amp;js=1&amp;rel=1&amp;rji=1&amp;sbe=0"></script><script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772162622885&amp;name=AdGuard%20Extra&amp;type=user-script"></script><script src="https://cdn.tailwindcss.com"></script>
+    <script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772162622885&amp;type=content-script&amp;dmn=aistudio.google.com&amp;url=https%3A%2F%2Faistudio.google.com%2F_%2Fupload%2F325d93db-f1f5-4cce-9e37-24943aac20f0%2Ffile%2F7f26e86fa1789e8917d6ba1164ac01d39bfa82089d7e395e7265765b6404f3a8&amp;app=msedge.exe&amp;css=3&amp;js=1&amp;rel=1&amp;rji=1&amp;sbe=0"></script><script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772162622885&amp;name=AdGuard%20Extra&amp;type=user-script"></script><script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -623,7 +623,17 @@
                         <div id="history-label-container" class="cursor-pointer group" title="Click to Clear All History">
                             <span id="history-header" class="text-[9px] font-black uppercase tracking-widest text-[#818cf8] group-hover:text-red-500 transition-colors">History</span>
                         </div>
-                        <button id="auto-download-btn" class="text-[8px] font-black uppercase tracking-tighter text-gray-500 hover:text-emerald-400 transition-colors flex items-center gap-1" title="Automatically download generated images to your default downloads folder">
+                        <div class="flex flex-col gap-1">
+                            <button id="set-save-folder-btn" class="text-[8px] font-black uppercase tracking-tighter text-gray-500 hover:text-emerald-400 transition-colors flex items-center gap-1" title="Select a folder to automatically save generated images (Requires Full App mode)">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+                                <span id="save-folder-label">Select Save Folder</span>
+                            </button>
+                            <button id="launch-full-app-btn" class="text-[7px] font-bold uppercase tracking-tighter text-amber-500 hover:text-amber-400 transition-colors flex items-center gap-1" title="Open app in a new tab to enable Folder Selection">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-2 w-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                                <span>Launch Full App (Enable Folder)</span>
+                            </button>
+                        </div>
+                        <button id="auto-download-btn" class="hidden text-[8px] font-black uppercase tracking-tighter text-gray-500 hover:text-emerald-400 transition-colors flex items-center gap-1" title="Automatically download generated images to your default downloads folder">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>
                             <span id="auto-download-label">Auto-Download: OFF</span>
                         </button>

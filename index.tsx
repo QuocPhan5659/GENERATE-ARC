@@ -12,6 +12,7 @@ declare global {
     saveApiKey?: () => void;
     sketchup?: {
         dialog_ready: () => void;
+        save_image?: (data: string, filename: string) => void;
     };
   }
 }
@@ -2006,6 +2007,15 @@ function addToHistory(imgSrc: string, promptData: PromptData) {
 function triggerDownload(imgSrc: string) {
     try {
         const fileName = `banana-pro-${Date.now()}.png`;
+        
+        // --- SketchUp Native Save Support ---
+        if (window.sketchup && typeof window.sketchup.save_image === 'function') {
+            window.sketchup.save_image(imgSrc, fileName);
+            console.log(`Sent to SketchUp for saving: ${fileName}`);
+            if (statusEl) statusEl.innerText = "Auto-saved to SketchUp folder.";
+            return;
+        }
+
         const a = document.createElement('a');
         a.href = imgSrc;
         a.download = fileName;
@@ -2021,16 +2031,27 @@ function triggerDownload(imgSrc: string) {
 const autoDownloadBtn = document.getElementById('auto-download-btn');
 const autoDownloadLabel = document.getElementById('auto-download-label');
 
-if (autoDownloadBtn) {
+if (autoDownloadBtn && autoDownloadLabel) {
+    // Initial label for SketchUp
+    if (window.sketchup) {
+        autoDownloadLabel.innerText = autoDownloadEnabled ? "Auto-Save to SketchUp: ON" : "Auto-Save to SketchUp: OFF";
+    }
+
     autoDownloadBtn.addEventListener('click', () => {
         autoDownloadEnabled = !autoDownloadEnabled;
         if (autoDownloadLabel) {
-            autoDownloadLabel.innerText = autoDownloadEnabled ? "Auto-Download: ON" : "Auto-Download: OFF";
+            if (window.sketchup) {
+                autoDownloadLabel.innerText = autoDownloadEnabled ? "Auto-Save to SketchUp: ON" : "Auto-Save to SketchUp: OFF";
+            } else {
+                autoDownloadLabel.innerText = autoDownloadEnabled ? "Auto-Download: ON" : "Auto-Download: OFF";
+            }
             autoDownloadBtn.classList.toggle('text-emerald-400', autoDownloadEnabled);
             autoDownloadBtn.classList.toggle('text-gray-500', !autoDownloadEnabled);
         }
         if (statusEl) {
-            statusEl.innerText = autoDownloadEnabled ? "Auto-download enabled." : "Auto-download disabled.";
+            statusEl.innerText = autoDownloadEnabled ? 
+                (window.sketchup ? "Auto-save to SketchUp enabled." : "Auto-download enabled.") : 
+                (window.sketchup ? "Auto-save to SketchUp disabled." : "Auto-download disabled.");
         }
     });
 }
