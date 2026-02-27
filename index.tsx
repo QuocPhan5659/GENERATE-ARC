@@ -2247,44 +2247,6 @@ if (closeGalleryModalBtn) {
     });
 }
 
-if (gallerySaveAllBtn) {
-    gallerySaveAllBtn.addEventListener('click', async () => {
-        const gallery = await getGalleryImages();
-        if (gallery.length === 0) return;
-        
-        const btn = gallerySaveAllBtn as HTMLButtonElement;
-        btn.disabled = true;
-        const originalText = btn.innerText;
-        
-        for (let i = 0; i < gallery.length; i++) {
-            const item = gallery[i];
-            btn.innerText = `Saving ${i + 1}/${gallery.length}...`;
-            if (statusEl) statusEl.innerText = `Saving image ${i + 1} of ${gallery.length} from gallery...`;
-            
-            triggerDownload(item.src, `banana-gallery-${item.id}.png`);
-            
-            // Wait 800ms between downloads to allow browser to process the queue sequentially
-            await new Promise(r => setTimeout(r, 800));
-        }
-        
-        btn.innerText = originalText;
-        btn.disabled = false;
-        if (statusEl) {
-            statusEl.innerText = "All images saved successfully.";
-            setTimeout(() => { statusEl.innerText = "System Standby"; }, 3000);
-        }
-    });
-}
-
-if (galleryClearAllBtn) {
-    galleryClearAllBtn.addEventListener('click', async () => {
-        if (confirm('Are you sure you want to clear all images?')) {
-            await clearGallery();
-            renderGalleryModal();
-        }
-    });
-}
-
 // Close modal on outside click
 galleryModal?.addEventListener('click', (e) => {
     if (e.target === galleryModal) closeGalleryModalBtn?.click();
