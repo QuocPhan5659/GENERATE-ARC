@@ -1952,17 +1952,128 @@ if (zoomMaskCanvas) {
     });
 }
 
-// --- History Logic ---
-let autoDownloadEnabled = false;
+// --- Gallery Storage (IndexedDB) ---
+const DB_NAME = 'BananaGalleryDB';
+const STORE_NAME = 'images';
+const DB_VERSION = 1;
 
+async function getDB() {
+    return new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function saveToGallery(src: string, promptData: PromptData) {
+    try {
+        const db = await getDB();
+        const now = Date.now();
+        const id = now.toString() + Math.random().toString(36).substr(2, 5);
+        
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        
+        await new Promise((resolve, reject) => {
+            const request = store.add({ id, src, timestamp: now, metadata: promptData });
+            request.onsuccess = resolve;
+            request.onerror = reject;
+        });
+        
+        // Cleanup old images (older than 24h)
+        cleanupGallery();
+    } catch (e) {
+        console.error("Failed to save to gallery", e);
+        if (statusEl) statusEl.innerText = "Gallery storage error.";
+    }
+}
+
+async function getGalleryImages() {
+    try {
+        const db = await getDB();
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const store = tx.objectStore(STORE_NAME);
+        return new Promise<any[]>((resolve, reject) => {
+            const request = store.getAll();
+            request.onsuccess = () => {
+                const now = Date.now();
+                // Filter 24h on retrieval too
+                resolve(request.result.filter(item => now - item.timestamp < 24 * 60 * 60 * 1000));
+            };
+            request.onerror = reject;
+        });
+    } catch (e) {
+        console.error("Failed to get gallery", e);
+        return [];
+    }
+}
+
+async function deleteFromGallery(id: string) {
+    const db = await getDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    return new Promise((resolve, reject) => {
+        const request = store.delete(id);
+        request.onsuccess = resolve;
+        request.onerror = reject;
+    });
+}
+
+async function clearGallery() {
+    const db = await getDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    return new Promise((resolve, reject) => {
+        const request = store.clear();
+        request.onsuccess = resolve;
+        request.onerror = reject;
+    });
+}
+
+let isCleaningUp = false;
+async function cleanupGallery() {
+    if (isCleaningUp) return;
+    isCleaningUp = true;
+    try {
+        const db = await getDB();
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        const now = Date.now();
+        
+        const request = store.openCursor();
+        request.onsuccess = (event: any) => {
+            const cursor = event.target.result;
+            if (cursor) {
+                if (now - cursor.value.timestamp > 24 * 60 * 60 * 1000) {
+                    cursor.delete();
+                }
+                cursor.continue();
+            } else {
+                isCleaningUp = false;
+            }
+        };
+        request.onerror = () => {
+            isCleaningUp = false;
+        };
+    } catch (e) {
+        console.error("Cleanup failed", e);
+        isCleaningUp = false;
+    }
+}
+
+// --- History Logic ---
 function addToHistory(imgSrc: string, promptData: PromptData) {
     if (!historyList) return;
     if (historyList.children.length === 1 && historyList.children[0].textContent === 'No history yet') { historyList.innerHTML = ''; }
     
-    // Auto-save if enabled
-    if (autoDownloadEnabled) {
-        triggerDownload(imgSrc);
-    }
+    // Save to Gallery Storage
+    saveToGallery(imgSrc, promptData);
 
     // Changed: Add click listener to item wrapper instead of img, and ensure item has cursor-pointer
     const item = document.createElement('div');
@@ -2004,57 +2115,164 @@ function addToHistory(imgSrc: string, promptData: PromptData) {
     historyList.insertBefore(item, historyList.firstChild);
 }
 
-function triggerDownload(imgSrc: string) {
-    try {
-        const fileName = `banana-pro-${Date.now()}.png`;
-        
-        // --- SketchUp Native Save Support ---
-        if (window.sketchup && typeof window.sketchup.save_image === 'function') {
-            window.sketchup.save_image(imgSrc, fileName);
-            console.log(`Sent to SketchUp for saving: ${fileName}`);
-            if (statusEl) statusEl.innerText = "Auto-saved to SketchUp folder.";
-            return;
-        }
+const openGalleryBtn = document.getElementById('open-gallery-btn');
+const galleryModal = document.getElementById('gallery-modal');
+const closeGalleryModalBtn = document.getElementById('close-gallery-modal-btn');
+const galleryModalList = document.getElementById('gallery-modal-list');
+const gallerySaveAllBtn = document.getElementById('gallery-save-all-btn');
+const galleryClearAllBtn = document.getElementById('gallery-clear-all-btn');
 
-        const a = document.createElement('a');
-        a.href = imgSrc;
-        a.download = fileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        console.log(`Auto-downloaded: ${fileName}`);
-    } catch (err) {
-        console.error("Auto-download failed", err);
+async function renderGalleryModal() {
+    if (!galleryModalList) return;
+    const gallery = await getGalleryImages();
+    
+    // Sort by timestamp descending
+    gallery.sort((a, b) => b.timestamp - a.timestamp);
+
+    // Limit to 100 most recent images to prevent memory crashes in embedded browsers
+    const displayGallery = gallery.slice(0, 100);
+
+    if (displayGallery.length === 0) {
+        galleryModalList.innerHTML = '<div class="col-span-full text-center py-20 text-gray-600 font-black uppercase tracking-widest">No images in gallery</div>';
+        return;
     }
+
+    galleryModalList.innerHTML = '';
+    displayGallery.forEach((item: any) => {
+        const card = document.createElement('div');
+        card.className = 'relative group rounded-lg overflow-hidden border border-white/10 hover:border-[#262380] transition-all bg-black/20 aspect-square cursor-pointer';
+        card.innerHTML = `
+            <img src="${item.src}" class="w-full h-full object-cover" alt="Generated Image" loading="lazy">
+            <div class="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-1 transition-opacity">
+                <button class="p-1 bg-[#262380] rounded-full hover:scale-110 transition-transform gallery-download-item" data-src="${item.src}" data-id="${item.id}" title="Download">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                </button>
+                <button class="p-1 bg-emerald-600 rounded-full hover:scale-110 transition-transform gallery-paste-item" data-id="${item.id}" title="Upload to PNG Info">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4" /></svg>
+                </button>
+                <button class="p-1 bg-red-600 rounded-full hover:scale-110 transition-transform gallery-delete-item" data-id="${item.id}" title="Delete">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+            </div>
+        `;
+
+        card.addEventListener('click', (e) => {
+            if ((e.target as HTMLElement).closest('button')) return;
+            // Clicking the image now opens the Zoom Overlay instead of loading into main preview
+            const zoomedImage = document.querySelector('#zoomed-image') as HTMLImageElement;
+            const zoomOverlay = document.querySelector('#zoom-overlay') as HTMLElement;
+            if (zoomedImage && zoomOverlay) {
+                zoomedImage.src = item.src;
+                zoomOverlay.classList.remove('hidden');
+                setTimeout(() => zoomOverlay.classList.add('opacity-100'), 10);
+            }
+        });
+
+        galleryModalList.appendChild(card);
+    });
+
+    // Attach listeners to new buttons
+    galleryModalList.querySelectorAll('.gallery-download-item').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const target = e.currentTarget as HTMLElement;
+            const src = target.getAttribute('data-src');
+            const id = target.getAttribute('data-id');
+            if (src && id) triggerDownload(src, `banana-gallery-${id}.png`);
+        });
+    });
+
+    galleryModalList.querySelectorAll('.gallery-paste-item').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const target = e.currentTarget as HTMLElement;
+            const id = target.getAttribute('data-id');
+            if (id) {
+                const item = displayGallery.find(i => i.id === id);
+                if (item && item.metadata) {
+                    // Instead of just populating metadata, we simulate the PNG Info flow
+                    // by setting the JSON text to clipboard and triggering the paste logic
+                    const jsonStr = JSON.stringify(item.metadata);
+                    navigator.clipboard.writeText(jsonStr).then(() => {
+                        document.getElementById('paste-png-info-btn')?.click();
+                        galleryModal?.classList.add('hidden');
+                    }).catch(err => {
+                        console.error("Failed to copy metadata to clipboard for PNG Info", err);
+                        if (statusEl) statusEl.innerText = "Failed to load PNG Info.";
+                    });
+                } else {
+                    if (statusEl) statusEl.innerText = "No metadata found for this image.";
+                }
+            }
+        });
+    });
+
+    galleryModalList.querySelectorAll('.gallery-delete-item').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            const target = e.currentTarget as HTMLElement;
+            const id = target.getAttribute('data-id');
+            if (id) {
+                await deleteFromGallery(id);
+                renderGalleryModal();
+            }
+        });
+    });
 }
 
-const autoDownloadBtn = document.getElementById('auto-download-btn');
-const autoDownloadLabel = document.getElementById('auto-download-label');
-
-if (autoDownloadBtn && autoDownloadLabel) {
-    // Initial label for SketchUp
-    if (window.sketchup) {
-        autoDownloadLabel.innerText = autoDownloadEnabled ? "Auto-Save to SketchUp: ON" : "Auto-Save to SketchUp: OFF";
+function triggerDownload(src: string, filename: string) {
+    // --- SketchUp Native Save Support ---
+    if (window.sketchup && typeof window.sketchup.save_image === 'function') {
+        window.sketchup.save_image(src, filename);
+        console.log(`Sent to SketchUp for saving: ${filename}`);
+        if (statusEl) statusEl.innerText = "Saved to SketchUp folder.";
+        return;
     }
 
-    autoDownloadBtn.addEventListener('click', () => {
-        autoDownloadEnabled = !autoDownloadEnabled;
-        if (autoDownloadLabel) {
-            if (window.sketchup) {
-                autoDownloadLabel.innerText = autoDownloadEnabled ? "Auto-Save to SketchUp: ON" : "Auto-Save to SketchUp: OFF";
-            } else {
-                autoDownloadLabel.innerText = autoDownloadEnabled ? "Auto-Download: ON" : "Auto-Download: OFF";
-            }
-            autoDownloadBtn.classList.toggle('text-emerald-400', autoDownloadEnabled);
-            autoDownloadBtn.classList.toggle('text-gray-500', !autoDownloadEnabled);
-        }
-        if (statusEl) {
-            statusEl.innerText = autoDownloadEnabled ? 
-                (window.sketchup ? "Auto-save to SketchUp enabled." : "Auto-download enabled.") : 
-                (window.sketchup ? "Auto-save to SketchUp disabled." : "Auto-download disabled.");
+    const a = document.createElement('a');
+    a.href = src;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
+if (openGalleryBtn) {
+    openGalleryBtn.addEventListener('click', () => {
+        renderGalleryModal();
+        galleryModal?.classList.remove('hidden');
+    });
+}
+
+if (closeGalleryModalBtn) {
+    closeGalleryModalBtn.addEventListener('click', () => {
+        galleryModal?.classList.add('hidden');
+    });
+}
+
+if (gallerySaveAllBtn) {
+    gallerySaveAllBtn.addEventListener('click', async () => {
+        const gallery = await getGalleryImages();
+        for (const item of gallery) {
+            triggerDownload(item.src, `banana-gallery-${item.id}.png`);
+            await new Promise(r => setTimeout(r, 200));
         }
     });
 }
+
+if (galleryClearAllBtn) {
+    galleryClearAllBtn.addEventListener('click', async () => {
+        if (confirm('Are you sure you want to clear all images?')) {
+            await clearGallery();
+            renderGalleryModal();
+        }
+    });
+}
+
+// Close modal on outside click
+galleryModal?.addEventListener('click', (e) => {
+    if (e.target === galleryModal) closeGalleryModalBtn?.click();
+});
+
+// Startup Cleanup
+cleanupGallery();
 
 // --- Use As Master Logic ---
 if (useAsMasterBtn) {

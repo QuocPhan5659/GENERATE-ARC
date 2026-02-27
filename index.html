@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Banana Pro Studio - Professional AI Suite</title>
-    <script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772162622885&amp;type=content-script&amp;dmn=aistudio.google.com&amp;url=https%3A%2F%2Faistudio.google.com%2F_%2Fupload%2F325d93db-f1f5-4cce-9e37-24943aac20f0%2Ffile%2F7f26e86fa1789e8917d6ba1164ac01d39bfa82089d7e395e7265765b6404f3a8&amp;app=msedge.exe&amp;css=3&amp;js=1&amp;rel=1&amp;rji=1&amp;sbe=0"></script><script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772162622885&amp;name=AdGuard%20Extra&amp;type=user-script"></script><script src="https://cdn.tailwindcss.com"></script>
+    <script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772166226637&amp;type=content-script&amp;dmn=aistudio.google.com&amp;url=https%3A%2F%2Faistudio.google.com%2F_%2Fupload%2F325d93db-f1f5-4cce-9e37-24943aac20f0%2Ffile%2Fa7d489809f88309e79cbd8cd408c8e15c7b8eec5909949e4f4b3454a8f85ac8c&amp;app=msedge.exe&amp;css=3&amp;js=1&amp;rel=1&amp;rji=1&amp;sbe=0"></script><script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772166226637&amp;name=AdGuard%20Extra&amp;type=user-script"></script><script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -91,6 +91,32 @@
                  <li class="flex justify-between items-center"><span class="text-gray-200">Pan Canvas (Zoomed)</span> <span class="text-[#818cf8] font-black bg-[#262380]/20 px-2 py-0.5 rounded border border-[#262380]/30">Middle Click</span></li>
             </ul>
             <p class="mt-6 text-[10px] text-gray-600 uppercase font-bold tracking-widest text-center">Banana Pro Studio v1.0</p>
+        </div>
+    </div>
+
+    <!-- Gallery Modal -->
+    <div id="gallery-modal" class="fixed inset-0 z-[400] bg-black/80 backdrop-blur-sm hidden flex items-center justify-center animate-in fade-in duration-200">
+        <div class="bg-[#121214] border border-white/10 w-full max-w-6xl h-[95vh] rounded-3xl overflow-hidden shadow-2xl relative flex flex-col">
+            <button id="close-gallery-modal-btn" class="absolute top-4 right-4 text-gray-500 hover:text-white transition-colors z-50">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+            
+            <div class="p-6 flex flex-col h-full overflow-hidden">
+                <div class="flex items-center justify-between mb-4 shrink-0">
+                    <div>
+                        <h2 class="text-lg font-black uppercase tracking-tighter text-[#818cf8]">Image Gallery</h2>
+                        <p class="text-[9px] text-gray-500 font-bold uppercase tracking-widest">Images expire after 24 hours</p>
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="gallery-save-all-btn" class="px-3 py-1.5 bg-[#262380] hover:bg-[#1e1b66] text-white text-[9px] font-black uppercase tracking-widest rounded-lg transition-all">Save All</button>
+                        <button id="gallery-clear-all-btn" class="px-3 py-1.5 bg-red-600/20 hover:bg-red-600 text-red-500 hover:text-white text-[9px] font-black uppercase tracking-widest rounded-lg transition-all border border-red-600/30">Clear All</button>
+                    </div>
+                </div>
+
+                <div id="gallery-modal-list" class="flex-1 overflow-y-auto custom-scrollbar grid grid-cols-3 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3 p-1">
+                    <!-- Images injected here -->
+                </div>
+            </div>
         </div>
     </div>
 
@@ -623,19 +649,9 @@
                         <div id="history-label-container" class="cursor-pointer group" title="Click to Clear All History">
                             <span id="history-header" class="text-[9px] font-black uppercase tracking-widest text-[#818cf8] group-hover:text-red-500 transition-colors">History</span>
                         </div>
-                        <div class="flex flex-col gap-1">
-                            <button id="set-save-folder-btn" class="text-[8px] font-black uppercase tracking-tighter text-gray-500 hover:text-emerald-400 transition-colors flex items-center gap-1" title="Select a folder to automatically save generated images (Requires Full App mode)">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
-                                <span id="save-folder-label">Select Save Folder</span>
-                            </button>
-                            <button id="launch-full-app-btn" class="text-[7px] font-bold uppercase tracking-tighter text-amber-500 hover:text-amber-400 transition-colors flex items-center gap-1" title="Open app in a new tab to enable Folder Selection">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-2 w-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
-                                <span>Launch Full App (Enable Folder)</span>
-                            </button>
-                        </div>
-                        <button id="auto-download-btn" class="hidden text-[8px] font-black uppercase tracking-tighter text-gray-500 hover:text-emerald-400 transition-colors flex items-center gap-1" title="Automatically download generated images to your default downloads folder">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>
-                            <span id="auto-download-label">Auto-Download: OFF</span>
+                        <button id="open-gallery-btn" class="text-[8px] font-black uppercase tracking-tighter text-gray-500 hover:text-[#818cf8] transition-colors flex items-center gap-1" title="Open image gallery">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 6a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V6z M9 11l3 3L22 4" /></svg>
+                            <span id="gallery-btn-label">Gallery</span>
                         </button>
                     </div>
                 </div>
