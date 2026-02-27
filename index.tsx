@@ -2250,9 +2250,28 @@ if (closeGalleryModalBtn) {
 if (gallerySaveAllBtn) {
     gallerySaveAllBtn.addEventListener('click', async () => {
         const gallery = await getGalleryImages();
-        for (const item of gallery) {
+        if (gallery.length === 0) return;
+        
+        const btn = gallerySaveAllBtn as HTMLButtonElement;
+        btn.disabled = true;
+        const originalText = btn.innerText;
+        
+        for (let i = 0; i < gallery.length; i++) {
+            const item = gallery[i];
+            btn.innerText = `Saving ${i + 1}/${gallery.length}...`;
+            if (statusEl) statusEl.innerText = `Saving image ${i + 1} of ${gallery.length} from gallery...`;
+            
             triggerDownload(item.src, `banana-gallery-${item.id}.png`);
-            await new Promise(r => setTimeout(r, 200));
+            
+            // Wait 800ms between downloads to allow browser to process the queue sequentially
+            await new Promise(r => setTimeout(r, 800));
+        }
+        
+        btn.innerText = originalText;
+        btn.disabled = false;
+        if (statusEl) {
+            statusEl.innerText = "All images saved successfully.";
+            setTimeout(() => { statusEl.innerText = "System Standby"; }, 3000);
         }
     });
 }
@@ -2417,6 +2436,7 @@ async function runGeneration() {
             if(progressVal > 95) progressVal = 95;
             generateProgress.style.width = `${progressVal}%`; 
             generateLabel.innerText = `STOP GENERATING (${progressVal}%)`;
+            if (statusEl) statusEl.innerText = `Generating... ${progressVal}%`;
         }, 100);
 
         try {
