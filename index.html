@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Banana Pro Studio - Professional AI Suite</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772162622885&amp;type=content-script&amp;dmn=aistudio.google.com&amp;url=https%3A%2F%2Faistudio.google.com%2F_%2Fupload%2F325d93db-f1f5-4cce-9e37-24943aac20f0%2Ffile%2F9fae4cd064504e05c7377d07b9f1f8750969ff958d339870debb354706068b6f&amp;app=msedge.exe&amp;css=3&amp;js=1&amp;rel=1&amp;rji=1&amp;sbe=0"></script><script type="text/javascript" nonce="5ac78ff6e457469bae53070949d" src="//local.adguard.org?ts=1772162622885&amp;name=AdGuard%20Extra&amp;type=user-script"></script><script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -110,6 +110,14 @@
           <canvas id="zoom-preview-canvas" class="absolute top-0 left-0 z-[215] pointer-events-none hidden"></canvas>
           <img id="zoomed-image" src="" class="max-w-none max-h-none pointer-events-none select-none rounded-xl shadow-2xl" alt="Zoomed view" />
         </div>
+
+        <!-- Zoom Navigation Buttons -->
+        <button id="prev-zoom-btn" class="absolute left-8 top-1/2 -translate-y-1/2 z-[250] p-4 bg-black/40 hover:bg-[#262380] text-white rounded-2xl border border-white/10 backdrop-blur-md transition-all hidden group/nav">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7" /></svg>
+        </button>
+        <button id="next-zoom-btn" class="absolute right-8 top-1/2 -translate-y-1/2 z-[250] p-4 bg-black/40 hover:bg-[#262380] text-white rounded-2xl border border-white/10 backdrop-blur-md transition-all hidden group/nav">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
+        </button>
       </div>
       
       <!-- Floating Toolbar in Zoom -->
@@ -158,7 +166,7 @@
       <div class="flex items-center gap-6">
         <div>
           <h1 class="text-lg md:text-xl font-extrabold text-white tracking-tight uppercase italic">
-            Banana <span class="text-[#262380]">Pro</span> Studio
+            Banana <span class="text-[#262380]">Pro</span> Studio <span class="text-[10px] text-gray-600 not-italic ml-1">v1.1</span>
           </h1>
           <p class="text-gray-500 text-[9px] font-bold tracking-[0.2em] hidden md:block mt-0.5">ADVANCED INPAINTING • MULTIMODAL SCENE CONTEXT</p>
         </div>
@@ -399,6 +407,7 @@
                       <select id="model-select" class="w-full bg-[#121214] border border-[#27272a] text-gray-300 text-[10px] font-bold uppercase tracking-wider rounded-xl p-2.5 focus:border-[#262380] appearance-none outline-none transition-all cursor-pointer hover:border-gray-700">
                           <option value="auto">Auto (Smart Select)</option>
                           <option value="gemini-3-pro-image-preview">Gemini 3.2 Pro (Best Quality)</option>
+                          <option value="gemini-3.1-flash-image-preview">Nano Banana 2 (High Quality)</option>
                           <option value="gemini-2.5-flash-image">Gemini 2.5 Flash (Fastest)</option>
                       </select>
                       <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
@@ -446,7 +455,7 @@
               <div class="grid grid-cols-2 gap-2">
                  <button id="global-reset-btn" class="w-full bg-white/5 border border-[#27272a] hover:bg-white/10 text-orange-500 hover:text-orange-400 font-black py-2.5 rounded-2xl transition-all duration-300 text-[9px] tracking-[0.2em] uppercase">RESET ALL</button>
                  <div class="w-full bg-transparent border border-white/5 rounded-2xl flex items-center justify-center">
-                    <span class="text-[8px] font-black uppercase tracking-widest text-gray-600">Banana Pro v1.0</span>
+                    <span class="text-[8px] font-black uppercase tracking-widest text-gray-600">Banana Pro v1.1</span>
                  </div>
               </div>
           </div>
@@ -609,8 +618,16 @@
                  </div>
             </div>
             <div class="flex-1 overflow-x-auto p-2 flex gap-3 items-center min-w-0" id="history-container">
-                <div class="h-full flex flex-col justify-center px-4 border-r border-white/5 shrink-0 cursor-pointer group" id="history-label-container" title="Click to Clear All History">
-                    <span id="history-header" class="text-[9px] font-black uppercase tracking-widest text-[#818cf8] group-hover:text-red-500 transition-colors">History</span>
+                <div class="h-full flex flex-col justify-center px-4 border-r border-white/5 shrink-0 min-w-[100px]">
+                    <div class="flex flex-col gap-1">
+                        <div id="history-label-container" class="cursor-pointer group" title="Click to Clear All History">
+                            <span id="history-header" class="text-[9px] font-black uppercase tracking-widest text-[#818cf8] group-hover:text-red-500 transition-colors">History</span>
+                        </div>
+                        <button id="auto-download-btn" class="text-[8px] font-black uppercase tracking-tighter text-gray-500 hover:text-emerald-400 transition-colors flex items-center gap-1" title="Automatically download generated images to your default downloads folder">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>
+                            <span id="auto-download-label">Auto-Download: OFF</span>
+                        </button>
+                    </div>
                 </div>
                 <div id="history-list" class="flex gap-2 h-full items-center">
                     <div class="text-[9px] text-gray-700 font-bold uppercase tracking-widest px-4">No history yet</div>

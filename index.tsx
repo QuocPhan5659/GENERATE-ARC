@@ -125,6 +125,8 @@ const miniGenerateBtn = document.querySelector('#mini-generate-btn') as HTMLButt
 const countBtns = document.querySelectorAll('.count-btn') as NodeListOf<HTMLButtonElement>;
 const prevImageBtn = document.querySelector('#prev-image-btn') as HTMLButtonElement;
 const nextImageBtn = document.querySelector('#next-image-btn') as HTMLButtonElement;
+const prevZoomBtn = document.querySelector('#prev-zoom-btn') as HTMLButtonElement;
+const nextZoomBtn = document.querySelector('#next-zoom-btn') as HTMLButtonElement;
 const imageCounterBadge = document.querySelector('#image-counter-badge') as HTMLDivElement;
 
 // Cost Tracking
@@ -142,6 +144,11 @@ const updateCostDisplay = (addedCost: number = 0) => {
         costDisplayEl.classList.remove('hidden');
         costDisplayEl.classList.add('flex');
     }
+};
+
+const resetCost = () => {
+    totalUsageCost = 0;
+    updateCostDisplay(0);
 };
 
 // Initialize Cost Display
@@ -309,6 +316,9 @@ if (saveApiKeyBtn && manualApiKeyInput) {
                 // Valid - Update State
                 manualApiKey = key;
                 localStorage.setItem('manualApiKey', key);
+                
+                // Reset Cost on Key Change
+                resetCost();
                 
                 // Immediately update Badge UI
                 updateAccountStatusUI();
@@ -1293,6 +1303,15 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
         setTimeout(() => { zoomOverlay.classList.add('hidden'); }, 300);
     });
     
+    const updateZoomNavigation = () => {
+        if (!prevZoomBtn || !nextZoomBtn) return;
+        if (currentImageIndex > 0) prevZoomBtn.classList.remove('hidden');
+        else prevZoomBtn.classList.add('hidden');
+        
+        if (currentImageIndex < generatedImages.length - 1) nextZoomBtn.classList.remove('hidden');
+        else nextZoomBtn.classList.add('hidden');
+    };
+
     // Zoom Output Button Logic
     const openOutputZoom = () => {
         if (outputImage.src) {
@@ -1306,6 +1325,14 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
             zoomMaskCanvas?.classList.add('hidden');
             zoomGuideCanvas?.classList.add('hidden');
             zoomPreviewCanvas?.classList.add('hidden');
+
+            // Show/Hide Zoom Navigation
+            if (generatedImages.length > 1) {
+                updateZoomNavigation();
+            } else {
+                prevZoomBtn?.classList.add('hidden');
+                nextZoomBtn?.classList.add('hidden');
+            }
 
             // Calculate Fit Scale
             const vw = zoomViewport.clientWidth;
@@ -1321,6 +1348,26 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
             };
         }
     };
+
+    if (prevZoomBtn) prevZoomBtn.addEventListener('click', (e) => { e.stopPropagation(); showImage(currentImageIndex - 1); });
+    if (nextZoomBtn) nextZoomBtn.addEventListener('click', (e) => { e.stopPropagation(); showImage(currentImageIndex + 1); });
+
+    // Keyboard Navigation
+    window.addEventListener('keydown', (e) => {
+        if (outputContainer.classList.contains('hidden')) return;
+        
+        if (e.key === 'ArrowLeft') {
+            showImage(currentImageIndex - 1);
+        } else if (e.key === 'ArrowRight') {
+            showImage(currentImageIndex + 1);
+        } else if (e.key === 'Escape') {
+            if (!zoomOverlay.classList.contains('hidden')) {
+                closeZoomBtn.click();
+            } else {
+                closeOutputBtn.click();
+            }
+        }
+    });
 
     if (zoomOutputBtn && outputImage) {
         zoomOutputBtn.addEventListener('click', (e) => {
@@ -1905,10 +1952,17 @@ if (zoomMaskCanvas) {
 }
 
 // --- History Logic ---
+let autoDownloadEnabled = false;
+
 function addToHistory(imgSrc: string, promptData: PromptData) {
     if (!historyList) return;
     if (historyList.children.length === 1 && historyList.children[0].textContent === 'No history yet') { historyList.innerHTML = ''; }
     
+    // Auto-save if enabled
+    if (autoDownloadEnabled) {
+        triggerDownload(imgSrc);
+    }
+
     // Changed: Add click listener to item wrapper instead of img, and ensure item has cursor-pointer
     const item = document.createElement('div');
     item.className = 'relative w-16 h-16 shrink-0 group border border-white/10 rounded-lg overflow-hidden hover:border-[#262380] transition-colors cursor-pointer';
@@ -1949,6 +2003,38 @@ function addToHistory(imgSrc: string, promptData: PromptData) {
     historyList.insertBefore(item, historyList.firstChild);
 }
 
+function triggerDownload(imgSrc: string) {
+    try {
+        const fileName = `banana-pro-${Date.now()}.png`;
+        const a = document.createElement('a');
+        a.href = imgSrc;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        console.log(`Auto-downloaded: ${fileName}`);
+    } catch (err) {
+        console.error("Auto-download failed", err);
+    }
+}
+
+const autoDownloadBtn = document.getElementById('auto-download-btn');
+const autoDownloadLabel = document.getElementById('auto-download-label');
+
+if (autoDownloadBtn) {
+    autoDownloadBtn.addEventListener('click', () => {
+        autoDownloadEnabled = !autoDownloadEnabled;
+        if (autoDownloadLabel) {
+            autoDownloadLabel.innerText = autoDownloadEnabled ? "Auto-Download: ON" : "Auto-Download: OFF";
+            autoDownloadBtn.classList.toggle('text-emerald-400', autoDownloadEnabled);
+            autoDownloadBtn.classList.toggle('text-gray-500', !autoDownloadEnabled);
+        }
+        if (statusEl) {
+            statusEl.innerText = autoDownloadEnabled ? "Auto-download enabled." : "Auto-download disabled.";
+        }
+    });
+}
+
 // --- Use As Master Logic ---
 if (useAsMasterBtn) {
     useAsMasterBtn.addEventListener('click', async () => {
@@ -1964,348 +2050,384 @@ if (useAsMasterBtn) {
 // --- Generate Logic ---
 
 async function runGeneration() {
-    if (isGenerating) {
-        if (abortController) { abortController.abort(); abortController = null; }
-        isGenerating = false; 
-        clearInterval(currentProgressInterval);
-        
-        generateProgress.style.width = '0%';
-        generateButton.classList.remove('bg-red-600'); generateButton.classList.add('bg-[#262380]');
-        generateLabel.innerText = "GENERATE (PROCESS)";
-        if (miniGenerateBtn) {
-             miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 group-hover:animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
-             miniGenerateBtn.classList.remove('bg-red-600'); miniGenerateBtn.classList.add('bg-[#262380]');
-        }
-        if(statusEl) statusEl.innerText = "Generation Stopped"; 
-        return;
-    }
-
-    if (!uploadedImageData) { alert("Please upload a main image first."); return; }
-    
-    // 1. Check for API Key FIRST to avoid exception
-    // We assume process.env.API_KEY is available (injected by environment or browser context)
-    // If empty, the SDK call will fail naturally or be caught.
-
-    // --- AUTOMATIC MODEL SELECTION & TIER CHECK ---
-    let isPro = false;
-    
-    // Check AI Studio environment for Key Selection (Login status)
-    const hasSelectedKey = typeof window.aistudio !== 'undefined' && await window.aistudio.hasSelectedApiKey();
-    
-    // Strict Pro Check: Must have ACTUAL key content, not just the flag
-    if (hasSelectedKey && process.env.API_KEY && process.env.API_KEY.length > 10) {
-        isPro = true;
-    }
-    
-    // Override: If Manual API Key is present, treat as Pro regardless of environment
-    if (manualApiKey && manualApiKey.length > 10) {
-        isPro = true;
-    }
-    
-    // Update Badge UI just in case it wasn't refreshed
-    updateAccountStatusUI();
-
-    let modelId = '';
-    // Config for image generation
-    let imageConfig: any = { 
-        aspectRatio: sizeSelect.value || '1:1' 
-    };
-
-    // --- MANUAL MODEL SELECTION ---
-    const modelSelect = document.querySelector('#model-select') as HTMLSelectElement;
-    const selectedModel = modelSelect?.value || 'auto';
-
-    if (selectedModel !== 'auto') {
-        // User manually selected a model
-        modelId = selectedModel;
-        
-        // If Pro model selected, enforce Pro checks
-        if (modelId === 'gemini-3-pro-image-preview') {
-             if (!isPro) {
-                 console.warn("User selected Pro model but no valid Pro key detected. Attempting anyway (will fallback if fails).");
-             }
-             imageConfig.imageSize = selectedResolution;
-             if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (${selectedResolution})...`;
-        } else {
-             // Flash
-             delete imageConfig.imageSize;
-             if(statusEl) statusEl.innerText = "Generating with Gemini 2.5 Flash...";
-        }
-    } else {
-        // --- AUTO MODE (Original Logic) ---
-        if (isPro) {
-            // --- PRO / ULTRA TIER ---
-            // Unlocks Gemini 3.0 Pro Image Model
-            // Supports 1K, 2K, 4K
-            modelId = 'gemini-3-pro-image-preview';
-            
-            // Pass resolution to imageConfig
-            imageConfig.imageSize = selectedResolution; 
-            
-            if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (Auto) (${selectedResolution})...`;
-        } else {
-            // --- FREE TIER ---
-            // Restricted to Gemini 1.5 (2.5 Flash Image)
-            // Restricted to 1K resolution
-            modelId = 'gemini-2.5-flash-image';
-            
-            // Enforce 1K limit
-            if (selectedResolution !== '1K') {
-                selectedResolution = '1K';
-                
-                // Visual Update for Resolution Buttons
-                resBtns.forEach(b => {
-                    if(b.getAttribute('data-value') === '1K') {
-                        b.classList.add('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
-                        b.classList.remove('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
-                    } else {
-                        b.classList.remove('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
-                        b.classList.add('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
-                    }
-                });
-                // Alert user about downgrade
-                // alert("Tài khoản Free chỉ hỗ trợ độ phân giải 1K. Đã tự động chuyển về Model 1.5 Free (Flash Image). Đăng nhập API Key Pro để mở khóa 2K/4K.");
-            }
-            
-            // Flash Image model does not support imageSize param
-            delete imageConfig.imageSize;
-            
-            if(statusEl) statusEl.innerText = "Generating with Model 1.5 Free (1K)...";
-        }
-    }
-
-    isGenerating = true; abortController = new AbortController(); 
-    generateButton.classList.remove('bg-[#262380]'); generateButton.classList.add('bg-red-600');
-    generateLabel.innerText = "STOP GENERATING (0%)";
-    if (miniGenerateBtn) {
-        miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" /></svg>`;
-        miniGenerateBtn.classList.remove('bg-[#262380]'); miniGenerateBtn.classList.add('bg-red-600');
-    }
-    generateProgress.style.width = '0%'; let progressVal = 0;
-    
-    // Start Progress Interval
-    currentProgressInterval = setInterval(() => {
-        progressVal += 1; 
-        if(progressVal > 95) progressVal = 95;
-        generateProgress.style.width = `${progressVal}%`; 
-        generateLabel.innerText = `STOP GENERATING (${progressVal}%)`;
-    }, 100);
-
     try {
-        // Updated Logic: Combine text box value with loaded file content (if any)
-        const getCombinedText = (elId: string, fileKey: string) => {
-            const elVal = (document.getElementById(elId) as HTMLTextAreaElement)?.value || '';
-            const fileVal = loadedFilesContent[fileKey] || '';
-            // If both exist, join them. If one exists, use it.
-            return [elVal, fileVal].filter(Boolean).join('\n').trim();
+        if (isGenerating) {
+            if (abortController) { abortController.abort(); abortController = null; }
+            isGenerating = false; 
+            clearInterval(currentProgressInterval);
+            
+            generateProgress.style.width = '0%';
+            generateButton.classList.remove('bg-red-600'); generateButton.classList.add('bg-[#262380]');
+            generateLabel.innerText = "GENERATE (PROCESS)";
+            if (miniGenerateBtn) {
+                 miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 group-hover:animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
+                 miniGenerateBtn.classList.remove('bg-red-600'); miniGenerateBtn.classList.add('bg-[#262380]');
+            }
+            if(statusEl) statusEl.innerText = "Generation Stopped"; 
+            return;
+        }
+
+        if (!uploadedImageData) { alert("Please upload a main image first."); return; }
+        
+        // 1. Check for API Key FIRST to avoid exception
+        // We assume process.env.API_KEY is available (injected by environment or browser context)
+        // If empty, the SDK call will fail naturally or be caught.
+
+        // --- AUTOMATIC MODEL SELECTION & TIER CHECK ---
+        let isPro = false;
+        
+        // Check AI Studio environment for Key Selection (Login status)
+        const hasSelectedKey = typeof window.aistudio !== 'undefined' && await window.aistudio.hasSelectedApiKey();
+        
+        // Strict Pro Check: Must have ACTUAL key content, not just the flag
+        if (hasSelectedKey && process.env.API_KEY && process.env.API_KEY.length > 10) {
+            isPro = true;
+        }
+        
+        // Override: If Manual API Key is present, treat as Pro regardless of environment
+        if (manualApiKey && manualApiKey.length > 10) {
+            isPro = true;
+        }
+        
+        // Update Badge UI just in case it wasn't refreshed
+        updateAccountStatusUI();
+
+        let modelId = '';
+        // Config for image generation
+        let imageConfig: any = { 
+            aspectRatio: sizeSelect.value || '1:1' 
         };
 
-        const p = getCombinedText('prompt-manual', 'prompt-manual');
-        const l = getCombinedText('lighting-manual', 'lighting-manual');
-        const s = getCombinedText('scene-manual', 'scene-manual');
-        const v = getCombinedText('view-manual', 'view-manual');
-        const i = inpaintingPromptToggle.checked ? inpaintingPromptText.value : '';
-        const fullPrompt = `${p}\nLighting: ${l}\nScene: ${s}\nView: ${v}\n${i ? 'Inpainting Instructions: ' + i : ''}\n${cameraProjectionEnabled ? 'Apply Camera Projection correction.' : ''}`.trim();
-        const parts: any[] = [];
-        referenceImages.forEach(ref => { parts.push({ inlineData: { mimeType: ref.mimeType, data: ref.data } }); });
-        parts.push({ inlineData: { mimeType: uploadedImageData.mimeType, data: uploadedImageData.data } });
-        parts.push({ text: fullPrompt });
+        // --- MANUAL MODEL SELECTION ---
+        const modelSelect = document.querySelector('#model-select') as HTMLSelectElement;
+        const selectedModel = modelSelect?.value || 'auto';
 
-        // Use local Helper (SDK Client)
-        // FIX: Prioritize AI Studio Selected Key over Manual Key if it exists
-        let finalApiKey = manualApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY;
-        
-        if (typeof window.aistudio !== 'undefined' && window.aistudio.hasSelectedApiKey) {
-            const hasSelected = await window.aistudio.hasSelectedApiKey();
-            if (hasSelected && process.env.API_KEY) {
-                console.log("Using AI Studio Selected Key");
-                finalApiKey = process.env.API_KEY;
+        if (selectedModel !== 'auto') {
+            // User manually selected a model
+            modelId = selectedModel;
+            
+            // If Pro model selected, enforce Pro checks
+            if (modelId === 'gemini-3-pro-image-preview') {
+                 if (!isPro) {
+                     console.warn("User selected Pro model but no valid Pro key detected. Attempting anyway (will fallback if fails).");
+                 }
+                 imageConfig.imageSize = selectedResolution;
+                 if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (${selectedResolution})...`;
+            } else if (modelId === 'gemini-3.1-flash-image-preview') {
+                 // Nano Banana 2
+                 imageConfig.imageSize = selectedResolution;
+                 if(statusEl) statusEl.innerText = `Generating with Nano Banana 2 (${selectedResolution})...`;
+            } else {
+                 // Flash
+                 delete imageConfig.imageSize;
+                 if(statusEl) statusEl.innerText = "Generating with Gemini 2.5 Flash...";
+            }
+        } else {
+            // --- AUTO MODE (Original Logic) ---
+            if (isPro) {
+                // --- PRO / ULTRA TIER ---
+                // Unlocks Gemini 3.0 Pro Image Model
+                // Supports 1K, 2K, 4K
+                modelId = 'gemini-3-pro-image-preview';
+                
+                // Pass resolution to imageConfig
+                imageConfig.imageSize = selectedResolution; 
+                
+                if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (Auto) (${selectedResolution})...`;
+            } else {
+                // --- FREE TIER ---
+                // Restricted to Gemini 1.5 (2.5 Flash Image)
+                // Restricted to 1K resolution
+                modelId = 'gemini-2.5-flash-image';
+                
+                // Enforce 1K limit
+                if (selectedResolution !== '1K') {
+                    selectedResolution = '1K';
+                    
+                    // Visual Update for Resolution Buttons
+                    resBtns.forEach(b => {
+                        if(b.getAttribute('data-value') === '1K') {
+                            b.classList.add('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
+                            b.classList.remove('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
+                        } else {
+                            b.classList.remove('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
+                            b.classList.add('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
+                        }
+                    });
+                }
+                
+                // Flash Image model does not support imageSize param
+                delete imageConfig.imageSize;
+                
+                if(statusEl) statusEl.innerText = "Generating with Model 1.5 Free (1K)...";
             }
         }
-        
-        const ai = new GoogleGenAI({ apiKey: finalApiKey });
 
-        const processResults = async (results: any[]) => {
-             generatedImages = []; // Clear previous
-             for (const result of results) {
-                const cand = result.candidates?.[0];
-                if (cand) {
-                    for (const part of cand.content.parts) {
-                        if (part.inlineData) {
-                            const promptData: PromptData = { mega: p, lighting: l, scene: s, view: v, inpaint: i, inpaintEnabled: inpaintingPromptToggle.checked, cameraProjection: cameraProjectionEnabled };
-                            try {
-                                const pngBase64 = await convertToPngBase64(part.inlineData.data, part.inlineData.mimeType);
-                                const finalBase64 = await embedMetadata(pngBase64, promptData);
-                                const src = `data:image/png;base64,${finalBase64}`;
-                                generatedImages.push(src);
-                                addToHistory(src, promptData);
-                            } catch (err) {
-                                console.error("Image processing error", err);
-                                const src = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                                generatedImages.push(src);
+        isGenerating = true; abortController = new AbortController(); 
+        generateButton.classList.remove('bg-[#262380]'); generateButton.classList.add('bg-red-600');
+        generateLabel.innerText = "STOP GENERATING (0%)";
+        if (miniGenerateBtn) {
+            miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" /></svg>`;
+            miniGenerateBtn.classList.remove('bg-[#262380]'); miniGenerateBtn.classList.add('bg-red-600');
+        }
+        generateProgress.style.width = '0%'; let progressVal = 0;
+        
+        // Start Progress Interval
+        currentProgressInterval = setInterval(() => {
+            progressVal += 1; 
+            if(progressVal > 95) progressVal = 95;
+            generateProgress.style.width = `${progressVal}%`; 
+            generateLabel.innerText = `STOP GENERATING (${progressVal}%)`;
+        }, 100);
+
+        try {
+            // Updated Logic: Combine text box value with loaded file content (if any)
+            const getCombinedText = (elId: string, fileKey: string) => {
+                const elVal = (document.getElementById(elId) as HTMLTextAreaElement)?.value || '';
+                const fileVal = loadedFilesContent[fileKey] || '';
+                // If both exist, join them. If one exists, use it.
+                return [elVal, fileVal].filter(Boolean).join('\n').trim();
+            };
+
+            const p = getCombinedText('prompt-manual', 'prompt-manual');
+            const l = getCombinedText('lighting-manual', 'lighting-manual');
+            const s = getCombinedText('scene-manual', 'scene-manual');
+            const v = getCombinedText('view-manual', 'view-manual');
+            const i = inpaintingPromptToggle.checked ? inpaintingPromptText.value : '';
+            const fullPrompt = `${p}\nLighting: ${l}\nScene: ${s}\nView: ${v}\n${i ? 'Inpainting Instructions: ' + i : ''}\n${cameraProjectionEnabled ? 'Apply Camera Projection correction.' : ''}`.trim();
+            const parts: any[] = [];
+            referenceImages.forEach(ref => { parts.push({ inlineData: { mimeType: ref.mimeType, data: ref.data } }); });
+            parts.push({ inlineData: { mimeType: uploadedImageData.mimeType, data: uploadedImageData.data } });
+            parts.push({ text: fullPrompt });
+
+            // Use local Helper (SDK Client)
+            // FIX: Prioritize AI Studio Selected Key over Manual Key if it exists
+            let finalApiKey = manualApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY;
+            
+            if (typeof window.aistudio !== 'undefined' && window.aistudio.hasSelectedApiKey) {
+                const hasSelected = await window.aistudio.hasSelectedApiKey();
+                if (hasSelected && process.env.API_KEY) {
+                    console.log("Using AI Studio Selected Key");
+                    finalApiKey = process.env.API_KEY;
+                }
+            }
+            
+            const ai = new GoogleGenAI({ apiKey: finalApiKey });
+
+            const processResults = async (results: any[]) => {
+                 generatedImages = []; // Clear previous
+                 for (const result of results) {
+                    const cand = result.candidates?.[0];
+                    if (cand) {
+                        for (const part of cand.content.parts) {
+                            if (part.inlineData) {
+                                const promptData: PromptData = { mega: p, lighting: l, scene: s, view: v, inpaint: i, inpaintEnabled: inpaintingPromptToggle.checked, cameraProjection: cameraProjectionEnabled };
+                                try {
+                                    const pngBase64 = await convertToPngBase64(part.inlineData.data, part.inlineData.mimeType);
+                                    const finalBase64 = await embedMetadata(pngBase64, promptData);
+                                    const src = `data:image/png;base64,${finalBase64}`;
+                                    generatedImages.push(src);
+                                    addToHistory(src, promptData);
+                                } catch (err) {
+                                    console.error("Image processing error", err);
+                                    const src = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                                    generatedImages.push(src);
+                                }
                             }
                         }
                     }
                 }
-            }
-            if (generatedImages.length > 0) {
-                outputContainer.classList.remove('hidden');
-                showImage(0);
-            }
-        };
-
-        try {
-            // 1. Hàm tạo thời gian nghỉ (Sleep) để chống lỗi 429
-            const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-            // 2. Chạy vòng lặp tuần tự thay vì song song
-            const results = [];
-            for (let k = 0; k < imageCount; k++) {
-                if (!abortController || abortController.signal.aborted) break;
-
-                if(statusEl) statusEl.innerText = `Đang tạo ảnh ${k + 1} / ${imageCount}...`;
-
-                try {
-                    // Gọi API tạo từng ảnh một
-                    const result = await ai.models.generateContent({ 
-                        model: modelId, 
-                        contents: { parts: parts }, 
-                        config: { imageConfig: imageConfig } 
-                    });
-                    results.push(result);
-
-                    // Update Cost
-                    // Estimate: Pro = $0.04, Flash = $0.004
-                    const costPerImg = modelId.includes('pro') ? 0.04 : 0.004;
-                    updateCostDisplay(costPerImg);
-
-                    // Nếu tạo thành công 1 ảnh, cập nhật thanh tiến trình thật
-                    const realProgress = Math.floor(((k + 1) / imageCount) * 95);
-                    generateProgress.style.width = `${realProgress}%`;
-                    generateLabel.innerText = `STOP GENERATING (${realProgress}%)`;
-
-                    // NGHỈ 3 GIÂY GIỮA CÁC LẦN GỌI ĐỂ BẢO VỆ API KEY (Trừ ảnh cuối cùng)
-                    if (k < imageCount - 1) {
-                        if(statusEl) statusEl.innerText = `Đang làm mát API (chờ 3 giây)...`;
-                        await sleep(3000); 
-                    }
-
-                } catch (imgErr: any) {
-                    const errMsg = imgErr.message || JSON.stringify(imgErr);
-
-                    // Rethrow 403/404 to trigger outer fallback logic
-                    if (errMsg.includes("403") || errMsg.includes("404") || errMsg.includes("PERMISSION_DENIED")) {
-                        // Suppress console error for expected 403s that we handle
-                        // console.warn("Permission denied (403), triggering fallback...");
-                        throw new Error("403 PERMISSION_DENIED");
-                    }
-                    
-                    console.error(`Lỗi ở ảnh thứ ${k + 1}:`, imgErr);
-
-                    // Nếu bị lỗi ở 1 ảnh, báo lỗi nhưng KHÔNG làm sập toàn bộ app
-                    if (errMsg.includes("429")) {
-                        alert(`Đã chạm trần giới hạn API ở ảnh thứ ${k + 1}. Đang dừng lại để bảo vệ tài khoản.`);
-                        break; // Dừng vòng lặp ngay lập tức
-                    }
-                    
-                    // Throw other errors to outer catch
-                    throw imgErr;
+                if (generatedImages.length > 0) {
+                    outputContainer.classList.remove('hidden');
+                    showImage(0);
                 }
-            }
-            
-            if (!abortController || abortController.signal.aborted) return;
-            
-            // Stop fake progress and set to 100%
-            clearInterval(currentProgressInterval);
-            generateProgress.style.width = '100%'; 
-            generateLabel.innerText = "STOP GENERATING (100%)";
+            };
 
-            await processResults(results);
+            try {
+                // 1. Hàm tạo thời gian nghỉ (Sleep) để chống lỗi 429
+                const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-        } catch (e: any) {
-            const errStr = e.message || JSON.stringify(e);
-            
-            // FALLBACK LOGIC for Pro Model 403/404
-            if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED")) && modelId === 'gemini-3-pro-image-preview') {
-                 
-                 // If manually selected, we still fallback but notify user
-                 if (selectedModel === 'gemini-3-pro-image-preview') {
-                     console.warn("Manual Pro selection failed (403). Falling back to Flash.");
-                     // Non-blocking notification via status text instead of Alert
-                     if(statusEl) statusEl.innerText = "Lỗi quyền Pro (403). Đang chuyển sang Flash (1K)...";
-                 } else {
-                     console.warn("Auto Pro selection failed (403). Falling back to Flash.");
-                     if(statusEl) statusEl.innerText = "Pro Model failed. Falling back to Flash (1K)...";
-                 }
-                 
-                 try {
-                     const fallbackModelId = 'gemini-2.5-flash-image';
-                     const fallbackConfig = { ...imageConfig };
-                     delete fallbackConfig.imageSize; // Flash doesn't support imageSize
+                // 2. Chạy vòng lặp tuần tự thay vì song song
+                const results = [];
+                for (let k = 0; k < imageCount; k++) {
+                    if (!abortController || abortController.signal.aborted) break;
+
+                    if(statusEl) statusEl.innerText = `Đang tạo ảnh ${k + 1} / ${imageCount}...`;
+
+                    try {
+                        // Gọi API tạo từng ảnh một với cơ chế Retry cho lỗi 500 (Internal Server Error)
+                        let result = null;
+                        let retries = 0;
+                        const maxRetries = 2;
+                        
+                        while (retries <= maxRetries) {
+                            try {
+                                result = await ai.models.generateContent({ 
+                                    model: modelId, 
+                                    contents: { parts: parts }, 
+                                    config: { imageConfig: imageConfig } 
+                                });
+                                break; // Thành công thì thoát vòng lặp retry
+                            } catch (retryErr: any) {
+                                const errStr = retryErr.message || JSON.stringify(retryErr);
+                                const is500 = errStr.includes("500") || errStr.includes("Internal Server Error");
+                                
+                                if (is500 && retries < maxRetries) {
+                                    retries++;
+                                    if(statusEl) statusEl.innerText = `Lỗi Server (500). Đang thử lại ${retries}/${maxRetries} (chờ 5s)...`;
+                                    await sleep(5000);
+                                    continue;
+                                }
+                                throw retryErr; // Nếu không phải lỗi 500 hoặc hết lượt retry thì quăng lỗi ra ngoài
+                            }
+                        }
+
+                        if (result) results.push(result);
+
+                        // Update Cost
+                        // Estimate: Pro = $0.04, Nano Banana 2 = $0.01, Flash = $0.004
+                        let costPerImg = 0.004;
+                        if (modelId.includes('pro')) costPerImg = 0.04;
+                        else if (modelId.includes('3.1-flash')) costPerImg = 0.01;
+                        
+                        updateCostDisplay(costPerImg);
+
+                        // Nếu tạo thành công 1 ảnh, cập nhật thanh tiến trình thật
+                        const realProgress = Math.floor(((k + 1) / imageCount) * 95);
+                        generateProgress.style.width = `${realProgress}%`;
+                        generateLabel.innerText = `STOP GENERATING (${realProgress}%)`;
+
+                        // NGHỈ 4 GIÂY GIỮA CÁC LẦN GỌI ĐỂ BẢO VỆ API KEY (Trừ ảnh cuối cùng)
+                        if (k < imageCount - 1) {
+                            if(statusEl) statusEl.innerText = `Đang làm mát API (chờ 4 giây)...`;
+                            await sleep(4000); 
+                        }
+
+                    } catch (imgErr: any) {
+                        const errMsg = imgErr.message || JSON.stringify(imgErr);
+
+                        // Rethrow 403/404 to trigger outer fallback logic
+                        if (errMsg.includes("403") || errMsg.includes("404") || errMsg.includes("PERMISSION_DENIED")) {
+                            // Suppress console error for expected 403s that we handle
+                            // console.warn("Permission denied (403), triggering fallback...");
+                            throw new Error("403 PERMISSION_DENIED");
+                        }
+                        
+                        console.error(`Lỗi ở ảnh thứ ${k + 1}:`, imgErr);
+
+                        // Nếu bị lỗi ở 1 ảnh, báo lỗi nhưng KHÔNG làm sập toàn bộ app
+                        if (errMsg.includes("429")) {
+                            alert(`Đã chạm trần giới hạn API ở ảnh thứ ${k + 1}. Đang dừng lại để bảo vệ tài khoản.`);
+                            break; // Dừng vòng lặp ngay lập tức
+                        }
+                        
+                        // Throw other errors to outer catch
+                        throw imgErr;
+                    }
+                }
+                
+                if (!abortController || abortController.signal.aborted) return;
+                
+                // Stop fake progress and set to 100%
+                clearInterval(currentProgressInterval);
+                generateProgress.style.width = '100%'; 
+                generateLabel.innerText = "STOP GENERATING (100%)";
+
+                await processResults(results);
+
+            } catch (e: any) {
+                const errStr = e.message || JSON.stringify(e);
+                
+                // FALLBACK LOGIC for Pro Model 403/404
+                if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED")) && modelId === 'gemini-3-pro-image-preview') {
                      
-                     // Use sequential loop for fallback too
-                     const fallbackResults = [];
-                     for (let k = 0; k < imageCount; k++) {
-                        if (!abortController || abortController.signal.aborted) break;
-                        
-                        fallbackResults.push(await ai.models.generateContent({ 
-                            model: fallbackModelId, 
-                            contents: { parts: parts }, 
-                            config: { imageConfig: fallbackConfig } 
-                        }));
-                        
-                        // Update Cost for Fallback (Flash)
-                        updateCostDisplay(0.004);
+                     // If manually selected, we still fallback but notify user
+                     if (selectedModel === 'gemini-3-pro-image-preview') {
+                         console.warn("Manual Pro selection failed (403). Falling back to Flash.");
+                         // Non-blocking notification via status text instead of Alert
+                         if(statusEl) statusEl.innerText = "Lỗi quyền Pro (403). Đang chuyển sang Flash (1K)...";
+                     } else {
+                         console.warn("Auto Pro selection failed (403). Falling back to Flash.");
+                         if(statusEl) statusEl.innerText = "Pro Model failed. Falling back to Flash (1K)...";
                      }
                      
-                     if (!abortController || abortController.signal.aborted) return;
+                     try {
+                         const fallbackModelId = 'gemini-2.5-flash-image';
+                         const fallbackConfig = { ...imageConfig };
+                         delete fallbackConfig.imageSize; // Flash doesn't support imageSize
+                         
+                         // Use sequential loop for fallback too
+                         const fallbackResults = [];
+                         for (let k = 0; k < imageCount; k++) {
+                            if (!abortController || abortController.signal.aborted) break;
+                            
+                            fallbackResults.push(await ai.models.generateContent({ 
+                                model: fallbackModelId, 
+                                contents: { parts: parts }, 
+                                config: { imageConfig: fallbackConfig } 
+                            }));
+                            
+                            // Update Cost for Fallback (Flash)
+                            updateCostDisplay(0.004);
+                         }
+                         
+                         if (!abortController || abortController.signal.aborted) return;
 
-                     clearInterval(currentProgressInterval); 
-                     generateProgress.style.width = '100%'; 
-                     generateLabel.innerText = "STOP GENERATING (100%)";
-                     
-                     await processResults(fallbackResults);
-                     
-                     alert("Lưu ý: API Key của bạn không hỗ trợ Model Pro (2K/4K) hoặc Model chưa được kích hoạt. Hệ thống đã tự động chuyển về Model Flash (1K).");
-                     return; // Success after fallback
+                         clearInterval(currentProgressInterval); 
+                         generateProgress.style.width = '100%'; 
+                         generateLabel.innerText = "STOP GENERATING (100%)";
+                         
+                         await processResults(fallbackResults);
+                         
+                         alert("Lưu ý: API Key của bạn không hỗ trợ Model Pro (2K/4K) hoặc Model chưa được kích hoạt. Hệ thống đã tự động chuyển về Model Flash (1K).");
+                         return; // Success after fallback
 
-                 } catch (fallbackErr: any) {
-                     console.error("Fallback failed", fallbackErr);
-                     throw fallbackErr; // Throw to outer catch to handle generic error
-                 }
+                     } catch (fallbackErr: any) {
+                         console.error("Fallback failed", fallbackErr);
+                         throw fallbackErr; // Throw to outer catch to handle generic error
+                     }
+                }
+                throw e; // Re-throw if not handled by fallback
             }
-            throw e; // Re-throw if not handled by fallback
-        }
-    } catch (e: any) { 
-        if (!abortController?.signal.aborted) { 
-            console.error(e); 
-            if(statusEl) statusEl.innerText = "Error encountered"; 
-            if (e.message.includes("429")) {
-                alert("API Quota exceeded. Please try again later.");
-            } else if (e.message.includes("401") || e.message.includes("403")) {
-                alert(`API Error: ${e.message}. Check your API Key and billing.`);
-            } else {
-                alert(`Generation failed: ${e.message}`);
+        } catch (e: any) { 
+            if (!abortController?.signal.aborted) { 
+                console.error(e); 
+                if(statusEl) statusEl.innerText = "Error encountered"; 
+                if (e.message.includes("429")) {
+                    alert("API Quota exceeded. Please try again later.");
+                } else if (e.message.includes("401") || e.message.includes("403")) {
+                    alert(`API Error: ${e.message}. Check your API Key and billing.`);
+                } else {
+                    alert(`Generation failed: ${e.message}`);
+                }
             }
         }
     } finally {
         // CRITICAL FIX: Ensure cleanup runs regardless of success or error
         clearInterval(currentProgressInterval);
         
-        if (isGenerating && !abortController?.signal.aborted) {
-            setTimeout(() => {
-                isGenerating = false; 
-                generateProgress.style.width = '0%';
-                generateButton.classList.remove('bg-red-600'); generateButton.classList.add('bg-[#262380]');
-                generateLabel.innerText = "GENERATE (PROCESS)";
-                if (miniGenerateBtn) {
-                     miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 group-hover:animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
-                     miniGenerateBtn.classList.remove('bg-red-600'); miniGenerateBtn.classList.add('bg-[#262380]');
-                }
-                if(statusEl) statusEl.innerText = "System Standby"; 
-                abortController = null;
-            }, 500); // Reduced timeout for snappier UI
-        }
+        // Always reset UI state to be safe
+        setTimeout(() => {
+            isGenerating = false; 
+            generateProgress.style.width = '0%';
+            generateButton.classList.remove('bg-red-600'); 
+            generateButton.classList.add('bg-[#262380]');
+            generateLabel.innerText = "GENERATE (PROCESS)";
+            
+            if (miniGenerateBtn) {
+                 miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 group-hover:animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
+                 miniGenerateBtn.classList.remove('bg-red-600'); 
+                 miniGenerateBtn.classList.add('bg-[#262380]');
+            }
+            
+            if(statusEl && !abortController?.signal.aborted) {
+                statusEl.innerText = "System Standby"; 
+            } else if (statusEl && abortController?.signal.aborted) {
+                statusEl.innerText = "Generation Stopped";
+            }
+            
+            abortController = null;
+        }, 300); 
     }
 }
 
@@ -2317,6 +2439,13 @@ function showImage(index: number) {
     currentImageIndex = index;
     outputImage.src = generatedImages[index];
     
+    // If zoom is open, update zoomed image too
+    if (!zoomOverlay.classList.contains('hidden')) {
+        zoomedImage.src = generatedImages[index];
+        // @ts-ignore
+        if (typeof updateZoomNavigation === 'function') updateZoomNavigation();
+    }
+
     // Update Badge
     if (imageCounterBadge) {
         imageCounterBadge.innerText = `${currentImageIndex + 1} / ${generatedImages.length}`;
