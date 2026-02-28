@@ -173,16 +173,12 @@ async function updateAccountStatusUI() {
     manualApiKey = localStorage.getItem('manualApiKey') || '';
     
     // Strict Check: Only show PRO/ULTRA if user has manually entered a key.
-    // We ignore process.env.API_KEY for the visual badge to allow "Free" state visibility.
-    let isPro = manualApiKey && manualApiKey.length > 10;
+    // We ignore process.env.API_KEY and platform selection for the visual badge 
+    // to ensure it shows "FREE" by default until the user explicitly adds their own key.
+    let isPro = !!(manualApiKey && manualApiKey.length > 10);
     
-    if (!isPro && typeof window.aistudio !== 'undefined' && window.aistudio.hasSelectedApiKey) {
-        isPro = await window.aistudio.hasSelectedApiKey();
-    }
-    
-    if (!isPro && process.env.API_KEY && process.env.API_KEY.length > 10) {
-        isPro = true;
-    }
+    // We do NOT check window.aistudio.hasSelectedApiKey here anymore for the UI badge.
+    // This ensures the user sees "FREE" until they manually add a key in the app.
 
     // Clear previous styles
     accountTierBadge.className = '';
@@ -215,11 +211,8 @@ async function updateAccountStatusUI() {
         }
         
         // Ensure click opens modal to allow switching/updating key
-        accountTierBadge.onclick = async () => {
-             if (typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
-                 await window.aistudio.openSelectKey();
-                 updateAccountStatusUI();
-             } else if (apiKeyModal) {
+        accountTierBadge.onclick = () => {
+             if (apiKeyModal) {
                 // Fallback to custom modal if not in AI Studio
                 manualApiKeyInput.value = manualApiKey; 
                 // Show Remove Key Button if Key exists
@@ -241,11 +234,8 @@ async function updateAccountStatusUI() {
             <span class="text-[10px] font-black tracking-[0.2em]">FREE</span>
         `;
         // Add click handler to open key modal for upgrade
-        accountTierBadge.onclick = async () => {
-             if (typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
-                 await window.aistudio.openSelectKey();
-                 updateAccountStatusUI();
-             } else if (apiKeyModal) {
+        accountTierBadge.onclick = () => {
+             if (apiKeyModal) {
                 manualApiKeyInput.value = manualApiKey; 
                 // Hide Remove Key Button if No Key
                 const removeBtn = document.getElementById('remove-key-btn');
@@ -277,7 +267,11 @@ if (apiKeyModal && closeApiKeyBtn) {
                 manualApiKeyInput.value = '';
                 updateAccountStatusUI();
                 apiKeyModal.classList.add('hidden');
-                if(statusEl) statusEl.innerText = "Key Removed. Switched to Free.";
+                if(statusEl) {
+                    statusEl.innerText = "API Key Removed. Switched to Free Mode.";
+                    setTimeout(() => statusEl.innerText = "System Standby", 3000);
+                }
+                alert("API Key has been removed. You are now in FREE mode.");
             };
             btnContainer.appendChild(removeBtn);
         }
@@ -325,11 +319,16 @@ if (saveApiKeyBtn && manualApiKeyInput) {
                 updateAccountStatusUI();
                 
                 // Visual Feedback on Button (Non-blocking)
-                saveApiKeyBtn.innerText = "SAVED!";
+                saveApiKeyBtn.innerText = "VERIFIED & SAVED!";
                 saveApiKeyBtn.classList.remove('opacity-50', 'cursor-wait');
                 saveApiKeyBtn.classList.add('bg-green-600', 'hover:bg-green-700', 'border-green-500');
                 
-                if(statusEl) statusEl.innerText = "API Key Verified. PRO features unlocked.";
+                if(statusEl) {
+                    statusEl.innerText = "API Key Verified. PRO features unlocked.";
+                    setTimeout(() => statusEl.innerText = "System Standby", 3000);
+                }
+                
+                alert("API Key added successfully! PRO features are now unlocked.");
                 
                 // Close modal automatically after short delay
                 setTimeout(() => {
@@ -361,28 +360,7 @@ if (saveApiKeyBtn && manualApiKeyInput) {
     });
 }
 
-// --- API Key Button Logic ---
-if (apiKeyBtn) {
-    // Always show button now
-    apiKeyBtn.style.display = 'block';
-    
-    // FORCE OPEN CUSTOM MODAL - Bypassing default AI Studio Dialog
-    apiKeyBtn.addEventListener('click', () => {
-        if (apiKeyModal) {
-            manualApiKeyInput.value = manualApiKey; 
-            
-            // Check visibility of Remove button
-            const removeBtn = document.getElementById('remove-key-btn');
-            if(removeBtn) {
-                if(manualApiKey && manualApiKey.length > 10) removeBtn.classList.remove('hidden');
-                else removeBtn.classList.add('hidden');
-            }
-
-            apiKeyModal.classList.remove('hidden');
-            manualApiKeyInput.focus();
-        }
-    });
-}
+// --- API Key Button Logic Removed ---
 
 // Help Elements
 const helpBtn = document.querySelector('#help-btn') as HTMLButtonElement;
@@ -2234,6 +2212,15 @@ function triggerDownload(src: string, filename: string) {
     document.body.removeChild(a);
 }
 
+if (galleryClearAllBtn) {
+    galleryClearAllBtn.addEventListener('click', async () => {
+        if (confirm("Are you sure you want to clear all images from the gallery?")) {
+            await clearGallery();
+            renderGalleryModal();
+        }
+    });
+}
+
 if (openGalleryBtn) {
     openGalleryBtn.addEventListener('click', () => {
         renderGalleryModal();
@@ -2294,20 +2281,9 @@ async function runGeneration() {
         // If empty, the SDK call will fail naturally or be caught.
 
         // --- AUTOMATIC MODEL SELECTION & TIER CHECK ---
-        let isPro = false;
-        
-        // Check AI Studio environment for Key Selection (Login status)
-        const hasSelectedKey = typeof window.aistudio !== 'undefined' && await window.aistudio.hasSelectedApiKey();
-        
-        // Strict Pro Check: Must have ACTUAL key content, not just the flag
-        if (hasSelectedKey && process.env.API_KEY && process.env.API_KEY.length > 10) {
-            isPro = true;
-        }
-        
-        // Override: If Manual API Key is present, treat as Pro regardless of environment
-        if (manualApiKey && manualApiKey.length > 10) {
-            isPro = true;
-        }
+        // Strict Check: Only treat as PRO if user has manually entered a key.
+        // This ensures the "FREE" vs "PRO" behavior is consistent with the UI badge.
+        let isPro = !!(manualApiKey && manualApiKey.length > 10);
         
         // Update Badge UI just in case it wasn't refreshed
         updateAccountStatusUI();
@@ -2334,9 +2310,9 @@ async function runGeneration() {
                  imageConfig.imageSize = selectedResolution;
                  if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (${selectedResolution})...`;
             } else if (modelId === 'gemini-3.1-flash-image-preview') {
-                 // Nano Banana 2
+                 // Banana Pro v1.2
                  imageConfig.imageSize = selectedResolution;
-                 if(statusEl) statusEl.innerText = `Generating with Nano Banana 2 (${selectedResolution})...`;
+                 if(statusEl) statusEl.innerText = `Generating with Banana Pro v1.2 (${selectedResolution})...`;
             } else {
                  // Flash
                  delete imageConfig.imageSize;
@@ -2506,7 +2482,7 @@ async function runGeneration() {
                         if (result) results.push(result);
 
                         // Update Cost
-                        // Estimate: Pro = $0.04, Nano Banana 2 = $0.01, Flash = $0.004
+                        // Estimate: Pro = $0.04, Banana Pro v1.2 = $0.01, Flash = $0.004
                         let costPerImg = 0.004;
                         if (modelId.includes('pro')) costPerImg = 0.04;
                         else if (modelId.includes('3.1-flash')) costPerImg = 0.01;
