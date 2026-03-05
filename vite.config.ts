@@ -10,6 +10,7 @@ export default defineConfig(({ mode }) => {
     return {
         base: '/GENERATE-ARC/',
       server: {
+          base: '/GENERATE-ARC/',
         port: 3000,
         host: '0.0.0.0',
       },
