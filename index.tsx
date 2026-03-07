@@ -394,8 +394,6 @@ const imageInput = document.querySelector('#image-input') as HTMLInputElement;
 const uploadPlaceholder = document.querySelector('#upload-placeholder') as HTMLDivElement;
 const inpaintingContainer = document.querySelector('#inpainting-container') as HTMLDivElement;
 const uploadPreview = document.querySelector('#upload-preview') as HTMLImageElement;
-const pasteImageBtn = document.querySelector('#paste-image-btn') as HTMLButtonElement;
-const screenshotBtn = document.querySelector('#screenshot-btn') as HTMLButtonElement;
 
 // Screenshot Overlay
 const screenshotOverlay = document.querySelector('#screenshot-overlay') as HTMLDivElement;
@@ -982,36 +980,6 @@ if (dropZone) {
 imageInput?.addEventListener('change', () => { if (imageInput.files?.[0]) handleMainImage(imageInput.files[0]); });
 
 // Paste Image Button Handler
-if (pasteImageBtn) {
-    pasteImageBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        try {
-            // Try standard API first
-            const clipboardItems = await navigator.clipboard.read();
-            let foundImage = false;
-            for (const item of clipboardItems) {
-                const imageTypes = item.types.filter(type => type.startsWith('image/'));
-                if (imageTypes.length > 0) {
-                    const blob = await item.getType(imageTypes[0]);
-                    const file = new File([blob], "pasted_image.png", { type: imageTypes[0] });
-                    handleMainImage(file);
-                    foundImage = true;
-                    break;
-                }
-            }
-            if (!foundImage) {
-                // If no image found via API, try text fallback or warn
-                alert("Không tìm thấy hình ảnh trong bộ nhớ đệm (Clipboard)!");
-            }
-        } catch (err) {
-            console.error('Paste API failed:', err);
-            // Fallback: Prompt user to use Ctrl+V
-            alert("Trình duyệt chặn truy cập Clipboard trực tiếp. Vui lòng nhấn phím tắt Ctrl+V (hoặc Cmd+V) để dán ảnh.");
-        }
-    });
-}
-
 // Global Paste Handler (Best for Plugins/Restricted Envs)
 document.addEventListener('paste', (e) => {
     // If user is pasting into a specific input, let it handle it (unless it's an image)
@@ -1127,14 +1095,6 @@ function initCropMode(w: number, h: number) {
     
     screenshotOverlay.classList.remove('hidden');
     isSnipping = false;
-}
-
-if(screenshotBtn) {
-    screenshotBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        captureScreen();
-    });
 }
 
 // Screenshot Canvas Events
@@ -1483,9 +1443,7 @@ document.addEventListener('keydown', (e) => {
         case 'a': document.getElementById('tool-arrow')?.click(); break;
         case 'o': document.getElementById('tool-ellipse')?.click(); break; // O for Ellipse/Oval
         case 'x': document.getElementById('clear-mask')?.click(); break; // Reset
-        case 'u': document.getElementById('paste-image-btn')?.click(); break; // Paste Image Shortcut
         case 'v': document.getElementById('paste-png-info-btn')?.click(); break; // Paste PNG Info Shortcut
-        case 's': document.getElementById('screenshot-btn')?.click(); break; // Screenshot Shortcut
     }
 });
 
@@ -1646,14 +1604,31 @@ fileDisplaySlots.forEach((slot) => {
     const targetKey = input?.getAttribute('data-target');
 
     const updateFile = async (file: File) => {
-        if (!file.name.endsWith('.txt')) return;
+        if (!file.name.endsWith('.txt') && !file.name.endsWith('.png')) return;
         try {
-            const text = await file.text();
-            if (targetKey) {
-                loadedFilesContent[targetKey] = text;
-                // REMOVED: Auto-population of textarea
-                // const textarea = document.getElementById(targetKey) as HTMLTextAreaElement;
-                // if (textarea) { textarea.value = text; autoResize(textarea); }
+            let text = '';
+            if (file.name.endsWith('.txt')) {
+                text = await file.text();
+            } else if (file.name.endsWith('.png')) {
+                const data = await extractMetadata(file);
+                if (data) {
+                    // Map targetKey to the correct property in PromptData
+                    // The targetKey for the input element is the ID of the textarea (e.g., 'prompt-manual')
+                    const textareaId = input?.getAttribute('data-target');
+                    if (textareaId === 'prompt-manual') text = data.mega || '';
+                    else if (textareaId === 'lighting-manual') text = data.lighting || '';
+                    else if (textareaId === 'scene-manual') text = data.scene || '';
+                    else if (textareaId === 'view-manual') text = data.view || '';
+                }
+            }
+
+            if (text && targetKey) {
+                // We only update the textarea to avoid doubling in getCombinedText
+                const textarea = document.getElementById(targetKey) as HTMLTextAreaElement;
+                if (textarea) { 
+                    textarea.value = text; 
+                    autoResize(textarea); 
+                }
             }
             if (nameSpan) nameSpan.innerText = file.name;
             infoDiv?.classList.remove('hidden'); statusSpan?.classList.add('hidden');
@@ -1683,8 +1658,19 @@ manualCtxEntries.forEach((el) => {
     el.addEventListener('dragleave', () => el.classList.remove('border-[#262380]'));
     el.addEventListener('drop', async (e) => {
         e.preventDefault(); el.classList.remove('border-[#262380]');
-        if (e.dataTransfer?.files?.[0] && e.dataTransfer.files[0].name.endsWith('.txt')) {
-             el.value = await e.dataTransfer.files[0].text(); autoResize(el);
+        const file = e.dataTransfer?.files?.[0];
+        if (!file) return;
+        if (file.name.endsWith('.txt')) {
+             el.value = await file.text(); autoResize(el);
+        } else if (file.name.endsWith('.png')) {
+             const data = await extractMetadata(file);
+             if (data) {
+                 if (el.id === 'prompt-manual') el.value = data.mega || '';
+                 else if (el.id === 'lighting-manual') el.value = data.lighting || '';
+                 else if (el.id === 'scene-manual') el.value = data.scene || '';
+                 else if (el.id === 'view-manual') el.value = data.view || '';
+                 autoResize(el);
+             }
         }
     });
 });
@@ -1946,6 +1932,103 @@ async function getDB() {
         };
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
+    });
+}
+
+function getMaskBase64(): string | null {
+    if (!maskCanvas) return null;
+    const context = maskCanvas.getContext('2d');
+    if (!context) return null;
+    
+    const w = maskCanvas.width;
+    const h = maskCanvas.height;
+    if (w === 0 || h === 0) return null;
+
+    const imageData = context.getImageData(0, 0, w, h);
+    const data = imageData.data;
+    let hasContent = false;
+    for (let i = 3; i < data.length; i += 4) {
+        if (data[i] > 0) {
+            hasContent = true;
+            break;
+        }
+    }
+    if (!hasContent) return null;
+
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = w;
+    tempCanvas.height = h;
+    const tempCtx = tempCanvas.getContext('2d');
+    if (!tempCtx) return null;
+
+    tempCtx.fillStyle = 'black';
+    tempCtx.fillRect(0, 0, w, h);
+
+    const tempImageData = tempCtx.getImageData(0, 0, w, h);
+    const tempData = tempImageData.data;
+    for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] > 0) {
+            tempData[i] = 255;
+            tempData[i + 1] = 255;
+            tempData[i + 2] = 255;
+            tempData[i + 3] = 255;
+        }
+    }
+    tempCtx.putImageData(tempImageData, 0, 0);
+    return tempCanvas.toDataURL('image/png').split(',')[1];
+}
+
+async function compositeInpaint(originalBase64: string, generatedBase64: string, maskBase64: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const originalImg = new Image();
+        const generatedImg = new Image();
+        const maskImg = new Image();
+        
+        let loadedCount = 0;
+        const onLoaded = () => {
+            loadedCount++;
+            if (loadedCount === 3) {
+                const canvas = document.createElement('canvas');
+                canvas.width = originalImg.width;
+                canvas.height = originalImg.height;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) { reject('No ctx'); return; }
+                
+                // 1. Draw original image
+                ctx.drawImage(originalImg, 0, 0);
+                
+                // 2. Create a temporary canvas for the masked generated image
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = originalImg.width;
+                tempCanvas.height = originalImg.height;
+                const tempCtx = tempCanvas.getContext('2d');
+                if (!tempCtx) { reject('No tempCtx'); return; }
+                
+                // 3. Draw mask on temp canvas
+                tempCtx.drawImage(maskImg, 0, 0, originalImg.width, originalImg.height);
+                
+                // 4. Use 'source-in' to only keep generated pixels where mask is white
+                tempCtx.globalCompositeOperation = 'source-in';
+                tempCtx.drawImage(generatedImg, 0, 0, originalImg.width, originalImg.height);
+                
+                // 5. Draw the temp canvas onto the main canvas
+                ctx.drawImage(tempCanvas, 0, 0);
+                
+                resolve(canvas.toDataURL('image/png').split(',')[1]);
+            }
+        };
+        
+        originalImg.onload = onLoaded;
+        generatedImg.onload = onLoaded;
+        maskImg.onload = onLoaded;
+        
+        originalImg.onerror = reject;
+        generatedImg.onerror = reject;
+        maskImg.onerror = reject;
+        
+        originalImg.src = `data:image/png;base64,${originalBase64}`;
+        generatedImg.src = `data:image/png;base64,${generatedBase64}`;
+        maskImg.src = `data:image/png;base64,${maskBase64}`;
     });
 }
 
@@ -2310,9 +2393,9 @@ async function runGeneration() {
                  imageConfig.imageSize = selectedResolution;
                  if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (${selectedResolution})...`;
             } else if (modelId === 'gemini-3.1-flash-image-preview') {
-                 // Banana Pro v1.2
+                 // Banana Pro v1.3
                  imageConfig.imageSize = selectedResolution;
-                 if(statusEl) statusEl.innerText = `Generating with Banana Pro v1.2 (${selectedResolution})...`;
+                 if(statusEl) statusEl.innerText = `Generating with Banana Pro v1.3 (${selectedResolution})...`;
             } else {
                  // Flash
                  delete imageConfig.imageSize;
@@ -2391,10 +2474,22 @@ async function runGeneration() {
             const s = getCombinedText('scene-manual', 'scene-manual');
             const v = getCombinedText('view-manual', 'view-manual');
             const i = inpaintingPromptToggle.checked ? inpaintingPromptText.value : '';
-            const fullPrompt = `${p}\nLighting: ${l}\nScene: ${s}\nView: ${v}\n${i ? 'Inpainting Instructions: ' + i : ''}\n${cameraProjectionEnabled ? 'Apply Camera Projection correction.' : ''}`.trim();
+            const maskBase64 = getMaskBase64();
+            
+            let fullPrompt = `${p}\nLighting: ${l}\nScene: ${s}\nView: ${v}\n${i ? 'Inpainting Instructions: ' + i : ''}\n${cameraProjectionEnabled ? 'Apply Camera Projection correction.' : ''}`.trim();
+            
+            if (maskBase64) {
+                fullPrompt += `\nINPAINTING MODE: The second image provided is a black and white mask for the first image. White pixels in the mask indicate the area to be modified. Black pixels indicate the area to be preserved exactly as it is. Do not change any details outside the white masked area.`;
+            }
+
             const parts: any[] = [];
             referenceImages.forEach(ref => { parts.push({ inlineData: { mimeType: ref.mimeType, data: ref.data } }); });
             parts.push({ inlineData: { mimeType: uploadedImageData.mimeType, data: uploadedImageData.data } });
+            
+            if (maskBase64) {
+                parts.push({ inlineData: { mimeType: 'image/png', data: maskBase64 } });
+            }
+            
             parts.push({ text: fullPrompt });
 
             // Use local Helper (SDK Client)
@@ -2420,7 +2515,17 @@ async function runGeneration() {
                             if (part.inlineData) {
                                 const promptData: PromptData = { mega: p, lighting: l, scene: s, view: v, inpaint: i, inpaintEnabled: inpaintingPromptToggle.checked, cameraProjection: cameraProjectionEnabled };
                                 try {
-                                    const pngBase64 = await convertToPngBase64(part.inlineData.data, part.inlineData.mimeType);
+                                    let pngBase64 = await convertToPngBase64(part.inlineData.data, part.inlineData.mimeType);
+                                    
+                                    // If inpainting with a mask, composite the result with the original image
+                                    if (maskBase64) {
+                                        try {
+                                            pngBase64 = await compositeInpaint(uploadedImageData.data, pngBase64, maskBase64);
+                                        } catch (compErr) {
+                                            console.error("Compositing error", compErr);
+                                        }
+                                    }
+
                                     const finalBase64 = await embedMetadata(pngBase64, promptData);
                                     const src = `data:image/png;base64,${finalBase64}`;
                                     generatedImages.push(src);
@@ -2482,7 +2587,7 @@ async function runGeneration() {
                         if (result) results.push(result);
 
                         // Update Cost
-                        // Estimate: Pro = $0.04, Banana Pro v1.2 = $0.01, Flash = $0.004
+                        // Estimate: Pro = $0.04, Banana Pro v1.3 = $0.01, Flash = $0.004
                         let costPerImg = 0.004;
                         if (modelId.includes('pro')) costPerImg = 0.04;
                         else if (modelId.includes('3.1-flash')) costPerImg = 0.01;
@@ -2535,17 +2640,37 @@ async function runGeneration() {
             } catch (e: any) {
                 const errStr = e.message || JSON.stringify(e);
                 
-                // FALLBACK LOGIC for Pro Model 403/404
-                if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED")) && modelId === 'gemini-3-pro-image-preview') {
+                // Handle "Requested entity was not found" by prompting for key selection
+                if (errStr.includes("Requested entity was not found") && typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
+                    console.warn("Requested entity not found. Prompting for key selection.");
+                    if(statusEl) statusEl.innerText = "Lỗi API: Không tìm thấy thực thể. Vui lòng chọn lại Key...";
+                    await window.aistudio.openSelectKey();
+                    // After opening key selection, we can't easily resume this specific generation, 
+                    // but we've fulfilled the requirement to prompt the user.
+                    throw e; 
+                }
+
+                // FALLBACK LOGIC for Paid Models (Pro and Banana Pro v1.3) 403/404
+                const isPaidModel = modelId === 'gemini-3-pro-image-preview' || modelId === 'gemini-3.1-flash-image-preview';
+                if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED")) && isPaidModel) {
                      
                      // If manually selected, we still fallback but notify user
-                     if (selectedModel === 'gemini-3-pro-image-preview') {
-                         console.warn("Manual Pro selection failed (403). Falling back to Flash.");
+                     if (selectedModel === modelId) {
+                         console.warn(`Manual ${modelId} selection failed (403). Falling back to Flash.`);
                          // Non-blocking notification via status text instead of Alert
-                         if(statusEl) statusEl.innerText = "Lỗi quyền Pro (403). Đang chuyển sang Flash (1K)...";
+                         if(statusEl) statusEl.innerText = "Lỗi quyền API (403). Đang chuyển sang Flash (1K)...";
                      } else {
-                         console.warn("Auto Pro selection failed (403). Falling back to Flash.");
-                         if(statusEl) statusEl.innerText = "Pro Model failed. Falling back to Flash (1K)...";
+                         console.warn(`Auto ${modelId} selection failed (403). Falling back to Flash.`);
+                         if(statusEl) statusEl.innerText = "Paid Model failed. Falling back to Flash (1K)...";
+                     }
+                     
+                     // If in AI Studio and it's a 403, it might be a key issue
+                     if ((errStr.includes("403") || errStr.includes("PERMISSION_DENIED")) && typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
+                         console.warn("Permission denied. Offering to open key selection.");
+                         if (confirm("Lỗi 403: Bạn không có quyền sử dụng Model này. Có thể do API Key chưa được kích hoạt thanh toán hoặc không đúng. Bạn có muốn chọn lại API Key không?")) {
+                             await window.aistudio.openSelectKey();
+                             throw e; // Stop here and let user retry after selecting key
+                         }
                      }
                      
                      try {
@@ -2576,7 +2701,7 @@ async function runGeneration() {
                          
                          await processResults(fallbackResults);
                          
-                         alert("Lưu ý: API Key của bạn không hỗ trợ Model Pro (2K/4K) hoặc Model chưa được kích hoạt. Hệ thống đã tự động chuyển về Model Flash (1K).");
+                         alert("Lưu ý: API Key của bạn không hỗ trợ Model Pro/High Quality (2K/4K) hoặc Model chưa được kích hoạt. Hệ thống đã tự động chuyển về Model Flash (1K).");
                          return; // Success after fallback
 
                      } catch (fallbackErr: any) {
