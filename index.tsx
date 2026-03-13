@@ -108,28 +108,26 @@ const getGenAI = () => {
 };
 
 /**
- * Helper to call Gemini with retry logic for 500/503 errors
+ * Helper function to call Gemini API with retry logic for 500 and 503 errors.
  */
-async function callGemini(fn: () => Promise<any>, maxRetries = 3): Promise<any> {
+async function callWithRetry<T>(apiCall: () => Promise<T>, maxRetries: number = 3): Promise<T> {
     let retries = 0;
-    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-    
-    while (retries <= maxRetries) {
+    while (true) {
         try {
-            return await fn();
+            return await apiCall();
         } catch (err: any) {
             const errStr = err.message || JSON.stringify(err);
-            const isRetryable = errStr.includes("500") || 
-                                errStr.includes("503") || 
-                                errStr.includes("UNAVAILABLE") || 
-                                errStr.includes("Internal Server Error") ||
-                                errStr.includes("high demand");
+            const isRetryable = errStr.includes("500") || errStr.includes("503") || errStr.includes("429") || 
+                               errStr.includes("Internal Server Error") || 
+                               errStr.includes("high demand") ||
+                               errStr.includes("UNAVAILABLE") ||
+                               errStr.includes("Quota exceeded");
             
             if (isRetryable && retries < maxRetries) {
                 retries++;
-                const delay = 3000 * retries; // Exponential-ish backoff
-                if(statusEl) statusEl.innerText = `Server Busy (${retries}/${maxRetries}). Retrying in ${delay/1000}s...`;
-                await sleep(delay);
+                const delay = Math.pow(2, retries) * 1000 + Math.random() * 1000; // Exponential backoff
+                if (statusEl) statusEl.innerText = `API Busy/Error (${retries}/${maxRetries}). Retrying in ${Math.round(delay/1000)}s...`;
+                await new Promise(resolve => setTimeout(resolve, delay));
                 continue;
             }
             throw err;
@@ -430,11 +428,11 @@ if (saveApiKeyBtn && manualApiKeyInput) {
             try {
                 // Perform a dummy check (lightweight generation)
                 const tempAi = new GoogleGenAI({ apiKey: key });
-                await callGemini(() => tempAi.models.generateContent({
+                await callWithRetry(() => tempAi.models.generateContent({
                     model: 'gemini-3-flash-preview',
                     contents: { parts: [{ text: "ping" }] },
                     config: { maxOutputTokens: 1 }
-                }));
+                }), 2); // Thử lại 2 lần cho bước xác thực
 
                 // Valid - Update State
                 manualApiKey = key;
@@ -667,7 +665,7 @@ async function translatePrompt(targetLang: 'VN' | 'EN') {
         const ai = getGenAI();
 
         // Using gemini-3-flash-preview for text tasks as requested
-        const response = await callGemini(() => ai.models.generateContent({
+        const response = await callWithRetry(() => ai.models.generateContent({
             model: 'gemini-3-flash-preview', 
             contents: { parts: [{ text: `Translate this JSON: ${jsonStr}` }] },
             config: { 
@@ -2793,8 +2791,8 @@ async function runGeneration() {
                     if(statusEl) statusEl.innerText = `Đang tạo ảnh ${k + 1} / ${imageCount}...`;
 
                     try {
-                        // Gọi API tạo từng ảnh một với cơ chế Retry (via callGemini)
-                        let result = await callGemini(async () => {
+                        // Gọi API tạo từng ảnh một với cơ chế Retry tích hợp sẵn trong callWithRetry
+                        let result = await callWithRetry(async () => {
                             if (modelId.startsWith('imagen')) {
                                 return await ai.models.generateImages({
                                     model: modelId,
@@ -2812,7 +2810,7 @@ async function runGeneration() {
                                     config: { imageConfig: imageConfig } 
                                 });
                             }
-                        });
+                        }, 3); // Tăng số lần thử lại lên 3 cho ổn định
 
                         if (result) results.push(result);
 
@@ -2898,8 +2896,7 @@ async function runGeneration() {
                      }
                      
                      // If in AI Studio and it's a 403, it's likely a key selection/billing issue
-                     // BUT only prompt if they AREN'T using a manual key (as requested)
-                     if (!manualApiKey && (errStr.includes("403") || errStr.includes("PERMISSION_DENIED")) && typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
+                     if ((errStr.includes("403") || errStr.includes("PERMISSION_DENIED")) && typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
                          console.warn("Permission denied. Offering to open key selection.");
                          const confirmed = await showCustomConfirm(
                              "Lỗi 403: Bạn không có quyền sử dụng Model này. Điều này thường do API Key chưa được kích hoạt thanh toán hoặc chưa được chọn đúng trong AI Studio. Bạn có muốn chọn lại API Key ngay bây giờ không?", 
@@ -2922,11 +2919,12 @@ async function runGeneration() {
                          for (let k = 0; k < imageCount; k++) {
                             if (!abortController || abortController.signal.aborted) break;
                             
-                            const fallbackRes = await callGemini(() => ai.models.generateContent({ 
+                            const fallbackRes = await callWithRetry(() => ai.models.generateContent({ 
                                 model: fallbackModelId, 
                                 contents: { parts: parts }, 
                                 config: { imageConfig: fallbackConfig } 
                             }));
+                            
                             fallbackResults.push(fallbackRes);
                             
                             // Update Cost for Fallback (Flash)
