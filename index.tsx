@@ -110,7 +110,7 @@ const getGenAI = () => {
 /**
  * Helper function to call Gemini API with retry logic for 500 and 503 errors.
  */
-async function callWithRetry<T>(apiCall: () => Promise<T>, maxRetries: number = 3): Promise<T> {
+async function callWithRetry<T>(apiCall: () => Promise<T>, maxRetries: number = 10): Promise<T> {
     let retries = 0;
     while (true) {
         try {
@@ -121,11 +121,13 @@ async function callWithRetry<T>(apiCall: () => Promise<T>, maxRetries: number = 
                                errStr.includes("Internal Server Error") || 
                                errStr.includes("high demand") ||
                                errStr.includes("UNAVAILABLE") ||
-                               errStr.includes("Quota exceeded");
+                               errStr.includes("Quota exceeded") ||
+                               errStr.includes("overloaded");
             
             if (isRetryable && retries < maxRetries) {
                 retries++;
-                const delay = Math.pow(2, retries) * 1000 + Math.random() * 1000; // Exponential backoff
+                // Exponential backoff with jitter
+                const delay = Math.min(Math.pow(2, retries) * 1000 + Math.random() * 2000, 30000); 
                 if (statusEl) statusEl.innerText = `API Busy/Error (${retries}/${maxRetries}). Retrying in ${Math.round(delay/1000)}s...`;
                 await new Promise(resolve => setTimeout(resolve, delay));
                 continue;
@@ -432,7 +434,7 @@ if (saveApiKeyBtn && manualApiKeyInput) {
                     model: 'gemini-3-flash-preview',
                     contents: { parts: [{ text: "ping" }] },
                     config: { maxOutputTokens: 1 }
-                }), 2); // Thử lại 2 lần cho bước xác thực
+                }), 3); // Thử lại 3 lần cho bước xác thực
 
                 // Valid - Update State
                 manualApiKey = key;
@@ -2615,25 +2617,28 @@ async function runGeneration() {
 
         // --- MANUAL MODEL SELECTION ---
         const modelSelect = document.querySelector('#model-select') as HTMLSelectElement;
-        const selectedModel = modelSelect?.value || 'gemini-3-pro-image-preview';
+        const selectedModel = modelSelect?.value || 'gemini-3.1-flash-image-preview';
 
         modelId = selectedModel;
         
         // If Pro model selected, enforce Pro checks
-        if (modelId === 'gemini-3-pro-image-preview') {
+        if (modelId === 'gemini-3.1-pro-preview') {
              if (!isPro) {
-                 console.warn("User selected Pro model but no valid Pro key detected. Attempting anyway (will fallback if fails).");
+                 console.warn("User selected Pro model but no valid Pro key detected.");
              }
-             imageConfig.imageSize = selectedResolution;
-             if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (${selectedResolution})...`;
+             if(statusEl) statusEl.innerText = `Generating with Gemini 3.1 Pro...`;
         } else if (modelId === 'gemini-3.1-flash-image-preview') {
-             // Banana Pro v1.5
+             // BANANA 2
              imageConfig.imageSize = selectedResolution;
-             if(statusEl) statusEl.innerText = `Generating with Banana Pro v1.5 (${selectedResolution})...`;
+             if(statusEl) statusEl.innerText = `Generating with BANANA 2 (${selectedResolution})...`;
+        } else if (modelId === 'gemini-3-flash-preview') {
+             if(statusEl) statusEl.innerText = `Generating with Gemini 3 Flash...`;
+        } else if (modelId === 'gemini-3.1-flash-lite-preview') {
+             if(statusEl) statusEl.innerText = `Generating with Gemini 3 Lite...`;
         } else if (modelId.startsWith('imagen')) {
-             // Imagen 4
+             // IMAGEN 4
              delete imageConfig.imageSize;
-             if(statusEl) statusEl.innerText = "Generating with Imagen 4...";
+             if(statusEl) statusEl.innerText = "Generating with IMAGEN 4...";
         } else {
              // Fallback
              delete imageConfig.imageSize;
@@ -2810,15 +2815,14 @@ async function runGeneration() {
                                     config: { imageConfig: imageConfig } 
                                 });
                             }
-                        }, 3); // Tăng số lần thử lại lên 3 cho ổn định
+                        }, 10); // Increase retries to 10 for stability during high demand
 
                         if (result) results.push(result);
 
                         // Update Cost (Vertex AI / Tier 1 Pricing)
-                        // Estimate: Pro (Ultra) = $0.012, Banana Pro v1.5 (Pro) = $0.003, Banana Free (Flash) = $0.0007
-                        let costPerImg = 0.0007;
+                        let costPerImg = 0.0007; // Default for Flash/Lite
                         if (modelId.includes('pro') || modelId.includes('imagen')) costPerImg = 0.012;
-                        else if (modelId.includes('3.1-flash')) costPerImg = 0.003;
+                        else if (modelId.includes('3.1-flash-image')) costPerImg = 0.003; // BANANA 2
                         
                         // Only track cost if using a Pro/Ultra tier (Tier 1 Billing)
                         if (isPro) updateCostDisplay(costPerImg);
@@ -2828,10 +2832,11 @@ async function runGeneration() {
                         generateProgress.style.width = `${realProgress}%`;
                         generateLabel.innerText = `STOP GENERATING (${realProgress}%)`;
 
-                        // NGHỈ 4 GIÂY GIỮA CÁC LẦN GỌI ĐỂ BẢO VỆ API KEY (Trừ ảnh cuối cùng)
+                        // NGHỈ GIỮA CÁC LẦN GỌI ĐỂ BẢO VỆ API KEY (Trừ ảnh cuối cùng)
                         if (k < imageCount - 1) {
-                            if(statusEl) statusEl.innerText = `Đang làm mát API (chờ 4 giây)...`;
-                            await sleep(4000); 
+                            const coolingDelay = 4000 + Math.random() * 2000; // Add jitter
+                            if(statusEl) statusEl.innerText = `Đang làm mát API (chờ ${Math.round(coolingDelay/1000)} giây)...`;
+                            await sleep(coolingDelay); 
                         }
 
                     } catch (imgErr: any) {
@@ -2879,8 +2884,8 @@ async function runGeneration() {
                     throw e; 
                 }
 
-                // FALLBACK LOGIC for Paid Models (Pro, Banana Pro v1.5, and Imagen 4) 403/404
-                const isPaidModel = modelId === 'gemini-3-pro-image-preview' || 
+                // FALLBACK LOGIC for Paid Models (Pro, BANANA 2, and IMAGEN 4) 403/404
+                const isPaidModel = modelId.includes('pro') || 
                                    modelId === 'gemini-3.1-flash-image-preview' || 
                                    modelId.startsWith('imagen');
                 if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED")) && isPaidModel) {
