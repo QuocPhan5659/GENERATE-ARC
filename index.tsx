@@ -110,7 +110,7 @@ const getGenAI = () => {
 /**
  * Helper function to call Gemini API with retry logic for 500 and 503 errors.
  */
-async function callWithRetry<T>(apiCall: () => Promise<T>, maxRetries: number = 10): Promise<T> {
+async function callWithRetry<T>(apiCall: () => Promise<T>, maxRetries: number = 15): Promise<T> {
     let retries = 0;
     while (true) {
         try {
@@ -122,13 +122,14 @@ async function callWithRetry<T>(apiCall: () => Promise<T>, maxRetries: number = 
                                errStr.includes("high demand") ||
                                errStr.includes("UNAVAILABLE") ||
                                errStr.includes("Quota exceeded") ||
-                               errStr.includes("overloaded");
+                               errStr.includes("overloaded") ||
+                               errStr.includes("deadline exceeded");
             
             if (isRetryable && retries < maxRetries) {
                 retries++;
                 // Exponential backoff with jitter
-                const delay = Math.min(Math.pow(2, retries) * 1000 + Math.random() * 2000, 30000); 
-                if (statusEl) statusEl.innerText = `API Busy/Error (${retries}/${maxRetries}). Retrying in ${Math.round(delay/1000)}s...`;
+                const delay = Math.min(Math.pow(2, retries) * 1500 + Math.random() * 3000, 45000); 
+                if (statusEl) statusEl.innerText = `API Busy/High Demand (${retries}/${maxRetries}). Retrying in ${Math.round(delay/1000)}s...`;
                 await new Promise(resolve => setTimeout(resolve, delay));
                 continue;
             }
@@ -318,74 +319,41 @@ async function updateAccountStatusUI() {
         }
     }
 
-    // Clear previous styles
-    accountTierBadge.className = '';
+    // Update API Key management UI
     accountTierBadge.classList.remove('hidden');
-    accountTierBadge.innerHTML = ''; 
-
+    
     if (isPro) {
-        // Determine PRO vs ULTRA based on Resolution setting
-        const isUltraMode = selectedResolution === '4K';
-
-        if (isUltraMode) {
-            // ULTRA STATE - Gold/Amber Pill
-            accountTierBadge.className = 'flex items-center gap-2 px-4 py-1.5 rounded-full border border-amber-500/50 bg-amber-900/20 text-amber-100 shadow-[0_0_15px_rgba(245,158,11,0.3)] cursor-pointer hover:bg-amber-900/40 transition-all group';
-            accountTierBadge.innerHTML = `
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-amber-400 drop-shadow-[0_0_5px_rgba(251,191,36,0.8)]" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-                </svg>
-                <span class="text-[10px] font-black tracking-[0.2em] drop-shadow-md">TIER 1 ULTRA</span>
-            `;
-        } else {
-            // PRO STATE - Blue/Purple Pill
-            accountTierBadge.className = 'flex items-center gap-2 px-4 py-1.5 rounded-full border border-[#4f46e5]/50 bg-[#1e1b4b]/60 text-white shadow-[0_0_15px_rgba(79,70,229,0.25)] cursor-pointer hover:bg-[#1e1b4b]/80 transition-all group';
-            accountTierBadge.innerHTML = `
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-cyan-400 drop-shadow-[0_0_2px_rgba(34,211,238,0.8)]" viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-                </svg>
-                <span class="text-[10px] font-black tracking-[0.2em] text-[#e0e7ff]">TIER 1 PRO</span>
-            `;
-        }
-        
-        accountTierBadge.onclick = () => {
-             if (apiKeyModal) {
-                manualApiKeyInput.value = manualApiKey; 
-                
-                // Update Modal Buttons
-                const removeBtn = document.getElementById('remove-api-key-btn');
-                
-                if(removeBtn) {
-                    if (manualApiKey) removeBtn.classList.remove('hidden');
-                    else removeBtn.classList.add('hidden');
-                }
-
-                apiKeyModal.classList.remove('hidden');
-                manualApiKeyInput.focus();
-            }
-        };
-
-    } else {
-        // FREE STATE - Grey Pill
-        accountTierBadge.className = 'flex items-center gap-2 px-4 py-1.5 rounded-full border border-gray-700 bg-gray-900/80 text-gray-400 cursor-pointer hover:border-gray-500 hover:text-white transition-all group';
+        // PRO STATE - Blue/Purple Pill (as in the image)
+        accountTierBadge.className = 'flex items-center gap-2 px-4 py-1.5 rounded-full border border-[#4f46e5]/50 bg-[#1e1b4b]/60 text-white shadow-[0_0_15px_rgba(79,70,229,0.25)] cursor-pointer hover:bg-[#1e1b4b]/80 transition-all group';
         accountTierBadge.innerHTML = `
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-gray-500 group-hover:text-green-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-cyan-400 drop-shadow-[0_0_2px_rgba(34,211,238,0.8)]" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+            </svg>
+            <span class="text-[10px] font-black tracking-[0.2em] text-[#e0e7ff]">PRO</span>
+        `;
+    } else {
+        // MISSING KEY - Red Blinking State
+        accountTierBadge.className = 'flex items-center gap-2 px-4 py-1.5 rounded-full border border-red-500/50 bg-red-900/20 text-red-400 cursor-pointer transition-all group api-key-missing';
+        accountTierBadge.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
             </svg>
-            <span class="text-[10px] font-black tracking-[0.2em]">FREE</span>
+            <span class="text-[10px] font-black tracking-[0.2em] uppercase">API KEY</span>
         `;
-        accountTierBadge.onclick = () => {
-             if (apiKeyModal) {
-                manualApiKeyInput.value = manualApiKey; 
-                
-                const removeBtn = document.getElementById('remove-api-key-btn');
-                
-                if(removeBtn) removeBtn.classList.add('hidden');
-
-                apiKeyModal.classList.remove('hidden');
-                manualApiKeyInput.focus();
-            }
-        };
     }
+
+    accountTierBadge.onclick = () => {
+        if (apiKeyModal) {
+            manualApiKeyInput.value = manualApiKey; 
+            const removeBtn = document.getElementById('remove-api-key-btn');
+            if(removeBtn) {
+                if (manualApiKey) removeBtn.classList.remove('hidden');
+                else removeBtn.classList.add('hidden');
+            }
+            apiKeyModal.classList.remove('hidden');
+            manualApiKeyInput.focus();
+        }
+    };
 }
 
 // Call on load
@@ -2627,15 +2595,11 @@ async function runGeneration() {
         // If Pro model selected, enforce Pro checks
         if (modelId === 'gemini-3-pro-image-preview') {
              imageConfig.imageSize = selectedResolution;
-             if(statusEl) statusEl.innerText = `Generating with Gemini 3.1 Pro (${selectedResolution})...`;
+             if(statusEl) statusEl.innerText = `Generating with BANANA PRO (${selectedResolution})...`;
         } else if (modelId === 'gemini-3.1-flash-image-preview') {
              // Gemini 3 Flash / BANANA 2
              imageConfig.imageSize = selectedResolution;
-             if(statusEl) statusEl.innerText = `Generating with Gemini 3 Flash (${selectedResolution})...`;
-        } else if (modelId === 'gemini-2.5-flash-image') {
-             // Gemini 3 Lite (using 2.5 Flash Image)
-             delete imageConfig.imageSize;
-             if(statusEl) statusEl.innerText = `Generating with Gemini 3 Lite...`;
+             if(statusEl) statusEl.innerText = `Generating with BANANA 2 (${selectedResolution})...`;
         } else if (modelId.startsWith('imagen')) {
              // IMAGEN 4
              delete imageConfig.imageSize;
