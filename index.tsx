@@ -107,6 +107,36 @@ const getGenAI = () => {
     return new GoogleGenAI({ apiKey: keyToUse });
 };
 
+/**
+ * Helper to call Gemini with retry logic for 500/503 errors
+ */
+async function callGemini(fn: () => Promise<any>, maxRetries = 3): Promise<any> {
+    let retries = 0;
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    
+    while (retries <= maxRetries) {
+        try {
+            return await fn();
+        } catch (err: any) {
+            const errStr = err.message || JSON.stringify(err);
+            const isRetryable = errStr.includes("500") || 
+                                errStr.includes("503") || 
+                                errStr.includes("UNAVAILABLE") || 
+                                errStr.includes("Internal Server Error") ||
+                                errStr.includes("high demand");
+            
+            if (isRetryable && retries < maxRetries) {
+                retries++;
+                const delay = 3000 * retries; // Exponential-ish backoff
+                if(statusEl) statusEl.innerText = `Server Busy (${retries}/${maxRetries}). Retrying in ${delay/1000}s...`;
+                await sleep(delay);
+                continue;
+            }
+            throw err;
+        }
+    }
+}
+
 // --- DOM Elements ---
 const statusEl = document.querySelector('#status') as HTMLDivElement;
 const outputContainer = document.querySelector('#output-container') as HTMLDivElement;
@@ -134,7 +164,6 @@ const imageCounterBadge = document.querySelector('#image-counter-badge') as HTML
 // Cost Tracking
 const costDisplayEl = document.querySelector('#cost-display') as HTMLDivElement;
 const totalCostValEl = document.querySelector('#total-cost-val') as HTMLSpanElement;
-const INITIAL_CREDIT = 300.00;
 let totalUsageCost = parseFloat(localStorage.getItem('banana_usage_cost') || '0');
 
 const updateCostDisplay = (addedCost: number = 0) => {
@@ -142,16 +171,10 @@ const updateCostDisplay = (addedCost: number = 0) => {
     localStorage.setItem('banana_usage_cost', totalUsageCost.toFixed(6));
     
     if (totalCostValEl) {
-        const remaining = Math.max(0, INITIAL_CREDIT - totalUsageCost);
-        totalCostValEl.innerText = `$${remaining.toFixed(3)} / $${INITIAL_CREDIT.toFixed(0)}`;
-        // Change color if running low
-        if (remaining < 10) {
-            totalCostValEl.classList.remove('text-emerald-400');
-            totalCostValEl.classList.add('text-red-400');
-        } else {
-            totalCostValEl.classList.remove('text-red-400');
-            totalCostValEl.classList.add('text-emerald-400');
-        }
+        totalCostValEl.innerText = `$${totalUsageCost.toFixed(3)}`;
+        // Always emerald for accumulation
+        totalCostValEl.classList.remove('text-red-400');
+        totalCostValEl.classList.add('text-emerald-400');
     }
 };
 
@@ -278,14 +301,8 @@ async function updateAccountStatusUI() {
     // Refresh from storage
     manualApiKey = localStorage.getItem('manualApiKey') || '';
     
-    // Check AI Studio status
-    let hasSelected = false;
-    if (typeof window.aistudio !== 'undefined' && window.aistudio.hasSelectedApiKey) {
-        hasSelected = await window.aistudio.hasSelectedApiKey();
-    }
-
-    // Pro status if manual key OR AI Studio key
-    let isPro = !!(manualApiKey && manualApiKey.length > 10) || hasSelected;
+    // Pro status if manual key
+    let isPro = !!(manualApiKey && manualApiKey.length > 10);
     
     // Update Cost Display Visibility - Only show if using a paid tier (Pro/Ultra)
     if (costDisplayEl) {
@@ -333,15 +350,10 @@ async function updateAccountStatusUI() {
                 
                 // Update Modal Buttons
                 const removeBtn = document.getElementById('remove-api-key-btn');
-                const selectBtn = document.getElementById('select-aistudio-key-btn');
                 
                 if(removeBtn) {
                     if (manualApiKey) removeBtn.classList.remove('hidden');
                     else removeBtn.classList.add('hidden');
-                }
-                
-                if(selectBtn && typeof window.aistudio !== 'undefined') {
-                    selectBtn.classList.remove('hidden');
                 }
 
                 apiKeyModal.classList.remove('hidden');
@@ -363,12 +375,8 @@ async function updateAccountStatusUI() {
                 manualApiKeyInput.value = manualApiKey; 
                 
                 const removeBtn = document.getElementById('remove-api-key-btn');
-                const selectBtn = document.getElementById('select-aistudio-key-btn');
                 
                 if(removeBtn) removeBtn.classList.add('hidden');
-                if(selectBtn && typeof window.aistudio !== 'undefined') {
-                    selectBtn.classList.remove('hidden');
-                }
 
                 apiKeyModal.classList.remove('hidden');
                 manualApiKeyInput.focus();
@@ -381,19 +389,7 @@ async function updateAccountStatusUI() {
 updateAccountStatusUI();
 
 // --- API Key Modal Logic ---
-const selectAIStudioKeyBtn = document.querySelector('#select-aistudio-key-btn') as HTMLButtonElement;
 const removeApiKeyBtn = document.querySelector('#remove-api-key-btn') as HTMLButtonElement;
-
-if (selectAIStudioKeyBtn) {
-    selectAIStudioKeyBtn.onclick = async () => {
-        if (typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
-            await window.aistudio.openSelectKey();
-            // After selection, update UI
-            updateAccountStatusUI();
-            apiKeyModal.classList.add('hidden');
-        }
-    };
-}
 
 if (removeApiKeyBtn) {
     removeApiKeyBtn.onclick = async () => {
@@ -404,7 +400,6 @@ if (removeApiKeyBtn) {
             manualApiKeyInput.value = '';
             updateAccountStatusUI();
             apiKeyModal.classList.add('hidden');
-            await showCustomAlert("API Key removed. Switched to FREE mode.");
         }
     };
 }
@@ -435,11 +430,11 @@ if (saveApiKeyBtn && manualApiKeyInput) {
             try {
                 // Perform a dummy check (lightweight generation)
                 const tempAi = new GoogleGenAI({ apiKey: key });
-                await tempAi.models.generateContent({
+                await callGemini(() => tempAi.models.generateContent({
                     model: 'gemini-3-flash-preview',
                     contents: { parts: [{ text: "ping" }] },
                     config: { maxOutputTokens: 1 }
-                });
+                }));
 
                 // Valid - Update State
                 manualApiKey = key;
@@ -460,8 +455,6 @@ if (saveApiKeyBtn && manualApiKeyInput) {
                     statusEl.innerText = "API Key Verified. PRO features unlocked.";
                     setTimeout(() => statusEl.innerText = "System Standby", 3000);
                 }
-                
-                await showCustomAlert("API Key added successfully! PRO features are now unlocked.");
                 
                 // Close modal automatically after short delay
                 setTimeout(() => {
@@ -486,9 +479,11 @@ if (saveApiKeyBtn && manualApiKeyInput) {
                     saveApiKeyBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
                     saveApiKeyBtn.disabled = false;
                 }, 2000);
+
+                await showCustomAlert("Invalid API Key. Please check your key and try again.", "Validation Error");
             }
         } else {
-            showCustomAlert("Please enter a valid API Key.");
+            await showCustomAlert("Please enter a valid API Key (at least 10 characters).", "Invalid Input");
         }
     });
 }
@@ -672,14 +667,14 @@ async function translatePrompt(targetLang: 'VN' | 'EN') {
         const ai = getGenAI();
 
         // Using gemini-3-flash-preview for text tasks as requested
-        const response = await ai.models.generateContent({
+        const response = await callGemini(() => ai.models.generateContent({
             model: 'gemini-3-flash-preview', 
             contents: { parts: [{ text: `Translate this JSON: ${jsonStr}` }] },
             config: { 
                 systemInstruction: systemPrompt,
                 responseMimeType: 'application/json'
             }
-        });
+        }));
 
         if (response.text) {
             // Clean up Markdown code blocks if present
@@ -729,15 +724,42 @@ if (langBtnEn) langBtnEn.addEventListener('click', () => translatePrompt('EN'));
 
 // --- Icon Button Logic ---
 
+async function copyToClipboard(text: string): Promise<boolean> {
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch (err) {
+        console.error('Clipboard write failed, trying fallback', err);
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        textArea.style.top = "0";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        try {
+            const successful = document.execCommand('copy');
+            document.body.removeChild(textArea);
+            return successful;
+        } catch (err) {
+            document.body.removeChild(textArea);
+            return false;
+        }
+    }
+}
+
 copyBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
         const targetId = btn.getAttribute('data-target');
         const el = document.getElementById(targetId!) as HTMLTextAreaElement;
         if (el && el.value) {
-            navigator.clipboard.writeText(el.value);
-            const originalColor = btn.style.color;
-            btn.style.color = '#4ade80'; 
-            setTimeout(() => btn.style.color = originalColor, 1000);
+            const success = await copyToClipboard(el.value);
+            if (success) {
+                const originalColor = btn.style.color;
+                btn.style.color = '#4ade80'; 
+                setTimeout(() => btn.style.color = originalColor, 1000);
+            }
         }
     });
 });
@@ -750,9 +772,17 @@ pasteBtns.forEach(btn => {
             try {
                 window.focus();
                 const text = await navigator.clipboard.readText();
+                if (!text) throw new Error("Empty clipboard");
                 el.value = text;
                 autoResize(el);
-            } catch (err) { console.error('Clipboard read failed', err); }
+            } catch (err) { 
+                console.warn('Clipboard read failed, opening manual paste modal', err); 
+                const pastedText = await showCustomPaste();
+                if (pastedText) {
+                    el.value = pastedText;
+                    autoResize(el);
+                }
+            }
         }
     });
 });
@@ -825,6 +855,33 @@ resBtns.forEach(btn => {
          updateAccountStatusUI();
     });
 });
+
+// --- Model Selection Logic ---
+const modelSelectEl = document.querySelector('#model-select') as HTMLSelectElement;
+if (modelSelectEl && sizeSelect) {
+    const updateSizeOptions = () => {
+        const isImagen = modelSelectEl.value.startsWith('imagen');
+        const options = sizeSelect.querySelectorAll('option');
+        options.forEach(opt => {
+            if (isImagen) {
+                // Imagen 4 only supports 1:1, 9:16, 16:9, 4:3, 3:4
+                if (opt.value === '3:2' || opt.value === '2:3') {
+                    opt.disabled = true;
+                    if (sizeSelect.value === opt.value) {
+                        sizeSelect.value = '1:1';
+                    }
+                } else {
+                    opt.disabled = false;
+                }
+            } else {
+                opt.disabled = false;
+            }
+        });
+    };
+    modelSelectEl.addEventListener('change', updateSizeOptions);
+    // Run once on init
+    updateSizeOptions();
+}
 
 if (cameraProjToggle) cameraProjToggle.addEventListener('change', () => { cameraProjectionEnabled = cameraProjToggle.checked; });
 
@@ -1460,18 +1517,21 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
         }
     });
 
-    // Zoom Wheel
+    // Zoom Pan & Wheel
     zoomOverlay.addEventListener('wheel', (e) => {
+        if (zoomOverlay.classList.contains('hidden')) return;
         e.preventDefault();
-        const delta = e.deltaY * -0.001; // Sensitivity
-        const newScale = Math.min(Math.max(0.1, zoomScale + delta), 5);
-        zoomScale = newScale;
-        updateZoomTransform();
-    });
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        const newScale = zoomScale * delta;
+        if (newScale > 0.1 && newScale < 20) {
+            zoomScale = newScale;
+            updateZoomTransform();
+        }
+    }, { passive: false });
 
-    // Zoom Pan (Middle Mouse)
-    zoomViewport?.addEventListener('mousedown', (e) => {
-        if (e.button === 1) { // Middle click
+    zoomViewport.addEventListener('mousedown', (e) => {
+        if (zoomOverlay.classList.contains('hidden')) return;
+        if (e.button === 1) { // Middle button
             e.preventDefault();
             isPanning = true;
             panStartX = e.clientX - panX;
@@ -1482,14 +1542,13 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
 
     window.addEventListener('mousemove', (e) => {
         if (isPanning) {
-            e.preventDefault();
             panX = e.clientX - panStartX;
             panY = e.clientY - panStartY;
             updateZoomTransform();
         }
     });
 
-    window.addEventListener('mouseup', (e) => {
+    window.addEventListener('mouseup', () => {
         if (isPanning) {
             isPanning = false;
             zoomViewport.style.cursor = 'grab';
@@ -1545,6 +1604,13 @@ document.addEventListener('keydown', (e) => {
         return;
     }
 
+    // Paste PNG Info Shortcut (Alt+V)
+    if (e.altKey && e.key.toLowerCase() === 'v') {
+        e.preventDefault();
+        document.getElementById('paste-png-info-btn')?.click();
+        return;
+    }
+
     // Brush Size Shortcuts [ and ]
     if (e.key === '[' || e.key === ']') {
         const step = 5;
@@ -1576,7 +1642,6 @@ document.addEventListener('keydown', (e) => {
         case 'a': document.getElementById('tool-arrow')?.click(); break;
         case 'o': document.getElementById('tool-ellipse')?.click(); break; // O for Ellipse/Oval
         case 'x': document.getElementById('clear-mask')?.click(); break; // Reset
-        case 'v': document.getElementById('paste-png-info-btn')?.click(); break; // Paste PNG Info Shortcut
     }
 });
 
@@ -2030,26 +2095,31 @@ function stopDrawing(e: MouseEvent, targetCanvas: HTMLCanvasElement) {
 
 // Attach listeners
 function attachCanvasListeners(canvas: HTMLCanvasElement) {
-    canvas.addEventListener('mousedown', (e) => startDrawing(e, canvas));
+    canvas.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return; // Only left click for inpainting
+        startDrawing(e, canvas);
+    });
     canvas.addEventListener('mousemove', (e) => draw(e, canvas));
     canvas.addEventListener('mouseup', (e) => stopDrawing(e, canvas));
     canvas.addEventListener('mouseout', (e) => stopDrawing(e, canvas));
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // Disable right-click menu
 }
 
 if (maskCanvas) attachCanvasListeners(maskCanvas);
 if (zoomMaskCanvas) {
     zoomMaskCanvas.addEventListener('mousedown', (e) => {
-        if(activeTool !== 'brush' && activeTool !== 'eraser' && e.button !== 0) return; 
+        if (e.button !== 0) return; // Only left click for inpainting
         startDrawing(e, zoomMaskCanvas);
     });
+    zoomMaskCanvas.addEventListener('contextmenu', (e) => e.preventDefault()); // Disable right-click menu
     // Global handlers for drag out
     window.addEventListener('mousemove', (e) => {
-        if(isDrawing && !isPanning && !zoomOverlay.classList.contains('hidden')) {
+        if(isDrawing && !zoomOverlay.classList.contains('hidden')) {
              draw(e, zoomMaskCanvas);
         }
     });
     window.addEventListener('mouseup', (e) => {
-        if(isDrawing && !isPanning && !zoomOverlay.classList.contains('hidden')) {
+        if(isDrawing && !zoomOverlay.classList.contains('hidden')) {
              stopDrawing(e, zoomMaskCanvas);
         }
     });
@@ -2420,18 +2490,36 @@ async function renderGalleryModal() {
 function triggerDownload(src: string, filename: string) {
     // --- SketchUp Native Save Support ---
     if (window.sketchup && typeof window.sketchup.save_image === 'function') {
-        window.sketchup.save_image(src, filename);
-        console.log(`Sent to SketchUp for saving: ${filename}`);
-        if (statusEl) statusEl.innerText = "Saved to SketchUp folder.";
-        return;
+        try {
+            window.sketchup.save_image(src, filename);
+            console.log(`Sent to SketchUp for saving: ${filename}`);
+            if (statusEl) statusEl.innerText = "Saved to SketchUp folder.";
+            return;
+        } catch (e) {
+            console.error("SketchUp save_image failed", e);
+        }
+    } else if (window.sketchup) {
+        console.warn("window.sketchup.save_image not found, falling back to browser download");
+        if (statusEl) statusEl.innerText = "SketchUp save not configured. Trying browser...";
     }
 
     const a = document.createElement('a');
     a.href = src;
     a.download = filename;
+    a.style.display = 'none';
     document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    
+    try {
+        a.click();
+        if (statusEl) statusEl.innerText = "Download triggered.";
+    } catch (e) {
+        console.error("Browser download failed", e);
+        if (statusEl) statusEl.innerText = "Download failed. Try right-click save.";
+    }
+    
+    setTimeout(() => {
+        document.body.removeChild(a);
+    }, 100);
 }
 
 if (galleryClearAllBtn) {
@@ -2496,7 +2584,10 @@ async function runGeneration() {
             return;
         }
 
-        if (!uploadedImageData) { showCustomAlert("Please upload a main image first.", "Input Required"); return; }
+        if (!uploadedImageData && !promptEl.value.trim()) { 
+            showCustomAlert("Please enter a prompt or upload an image first.", "Input Required"); 
+            return; 
+        }
         
         // 1. Check for API Key FIRST to avoid exception
         // We assume process.env.API_KEY is available (injected by environment or browser context)
@@ -2526,67 +2617,29 @@ async function runGeneration() {
 
         // --- MANUAL MODEL SELECTION ---
         const modelSelect = document.querySelector('#model-select') as HTMLSelectElement;
-        const selectedModel = modelSelect?.value || 'auto';
+        const selectedModel = modelSelect?.value || 'gemini-3-pro-image-preview';
 
-        if (selectedModel !== 'auto') {
-            // User manually selected a model
-            modelId = selectedModel;
-            
-            // If Pro model selected, enforce Pro checks
-            if (modelId === 'gemini-3-pro-image-preview') {
-                 if (!isPro) {
-                     console.warn("User selected Pro model but no valid Pro key detected. Attempting anyway (will fallback if fails).");
-                 }
-                 imageConfig.imageSize = selectedResolution;
-                 if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (${selectedResolution})...`;
-            } else if (modelId === 'gemini-3.1-flash-image-preview') {
-                 // Banana Pro v1.4
-                 imageConfig.imageSize = selectedResolution;
-                 if(statusEl) statusEl.innerText = `Generating with Banana Pro v1.4 (${selectedResolution})...`;
-            } else {
-                 // Banana Free
-                 delete imageConfig.imageSize;
-                 if(statusEl) statusEl.innerText = "Generating with Banana Free...";
-            }
+        modelId = selectedModel;
+        
+        // If Pro model selected, enforce Pro checks
+        if (modelId === 'gemini-3-pro-image-preview') {
+             if (!isPro) {
+                 console.warn("User selected Pro model but no valid Pro key detected. Attempting anyway (will fallback if fails).");
+             }
+             imageConfig.imageSize = selectedResolution;
+             if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (${selectedResolution})...`;
+        } else if (modelId === 'gemini-3.1-flash-image-preview') {
+             // Banana Pro v1.5
+             imageConfig.imageSize = selectedResolution;
+             if(statusEl) statusEl.innerText = `Generating with Banana Pro v1.5 (${selectedResolution})...`;
+        } else if (modelId.startsWith('imagen')) {
+             // Imagen 4
+             delete imageConfig.imageSize;
+             if(statusEl) statusEl.innerText = "Generating with Imagen 4...";
         } else {
-            // --- AUTO MODE (Original Logic) ---
-            if (isPro) {
-                // --- PRO / ULTRA TIER ---
-                // Unlocks Gemini 3.0 Pro Image Model
-                // Supports 1K, 2K, 4K
-                modelId = 'gemini-3-pro-image-preview';
-                
-                // Pass resolution to imageConfig
-                imageConfig.imageSize = selectedResolution; 
-                
-                if(statusEl) statusEl.innerText = `Generating with Gemini 3.2 Pro (Auto) (${selectedResolution})...`;
-            } else {
-                // --- FREE TIER ---
-                // Restricted to Gemini 1.5 (2.5 Flash Image)
-                // Restricted to 1K resolution
-                modelId = 'gemini-2.5-flash-image';
-                
-                // Enforce 1K limit
-                if (selectedResolution !== '1K') {
-                    selectedResolution = '1K';
-                    
-                    // Visual Update for Resolution Buttons
-                    resBtns.forEach(b => {
-                        if(b.getAttribute('data-value') === '1K') {
-                            b.classList.add('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
-                            b.classList.remove('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
-                        } else {
-                            b.classList.remove('active', 'border-[#262380]', 'bg-[#262380]/20', 'text-white');
-                            b.classList.add('border-[#27272a]', 'bg-[#121214]', 'text-gray-500');
-                        }
-                    });
-                }
-                
-                // Flash Image model does not support imageSize param
-                delete imageConfig.imageSize;
-                
-                if(statusEl) statusEl.innerText = "Generating with Banana Free (1K)...";
-            }
+             // Fallback
+             delete imageConfig.imageSize;
+             if(statusEl) statusEl.innerText = "Generating...";
         }
 
         isGenerating = true; abortController = new AbortController(); 
@@ -2625,15 +2678,17 @@ async function runGeneration() {
             
             let fullPrompt = `${p}\nLighting: ${l}\nScene: ${s}\nView: ${v}\n${i ? 'Inpainting Instructions: ' + i : ''}\n${cameraProjectionEnabled ? 'Apply Camera Projection correction.' : ''}`.trim();
             
-            if (maskBase64) {
+            if (maskBase64 && uploadedImageData) {
                 fullPrompt += `\nINPAINTING MODE: The second image provided is a black and white mask for the first image. White pixels in the mask indicate the area to be modified. Black pixels indicate the area to be preserved exactly as it is. Do not change any details outside the white masked area.`;
             }
 
             const parts: any[] = [];
             referenceImages.forEach(ref => { parts.push({ inlineData: { mimeType: ref.mimeType, data: ref.data } }); });
-            parts.push({ inlineData: { mimeType: uploadedImageData.mimeType, data: uploadedImageData.data } });
+            if (uploadedImageData) {
+                parts.push({ inlineData: { mimeType: uploadedImageData.mimeType, data: uploadedImageData.data } });
+            }
             
-            if (maskBase64) {
+            if (maskBase64 && uploadedImageData) {
                 parts.push({ inlineData: { mimeType: 'image/png', data: maskBase64 } });
             }
             
@@ -2659,38 +2714,67 @@ async function runGeneration() {
             const ai = new GoogleGenAI({ apiKey: finalApiKey });
 
             const processResults = async (results: any[]) => {
-                 generatedImages = []; // Clear previous
-                 for (const result of results) {
-                    const cand = result.candidates?.[0];
-                    if (cand) {
-                        for (const part of cand.content.parts) {
-                            if (part.inlineData) {
-                                const promptData: PromptData = { mega: p, lighting: l, scene: s, view: v, inpaint: i, inpaintEnabled: inpaintingPromptToggle.checked, cameraProjection: cameraProjectionEnabled };
-                                try {
-                                    let pngBase64 = await convertToPngBase64(part.inlineData.data, part.inlineData.mimeType);
-                                    
-                                    // If inpainting with a mask, composite the result with the original image
-                                    if (maskBase64) {
-                                        try {
-                                            pngBase64 = await compositeInpaint(uploadedImageData.data, pngBase64, maskBase64);
-                                        } catch (compErr) {
-                                            console.error("Compositing error", compErr);
+                  generatedImages = []; // Clear previous
+                  for (const result of results) {
+                    // Handle both GenerateContentResponse (Gemini) and GenerateImagesResponse (Imagen)
+                    if (result.candidates) {
+                        // Gemini Format
+                        const cand = result.candidates?.[0];
+                        if (cand) {
+                            for (const part of cand.content.parts) {
+                                if (part.inlineData) {
+                                    const promptData: PromptData = { mega: p, lighting: l, scene: s, view: v, inpaint: i, inpaintEnabled: inpaintingPromptToggle.checked, cameraProjection: cameraProjectionEnabled };
+                                    try {
+                                        let pngBase64 = await convertToPngBase64(part.inlineData.data, part.inlineData.mimeType);
+                                        
+                                        // If inpainting with a mask, composite the result with the original image
+                                        if (maskBase64 && uploadedImageData) {
+                                            try {
+                                                pngBase64 = await compositeInpaint(uploadedImageData.data, pngBase64, maskBase64);
+                                            } catch (compErr) {
+                                                console.error("Compositing error", compErr);
+                                            }
                                         }
-                                    }
 
-                                    const finalBase64 = await embedMetadata(pngBase64, promptData);
-                                    const src = `data:image/png;base64,${finalBase64}`;
-                                    generatedImages.push(src);
-                                    addToHistory(src, promptData);
-                                } catch (err) {
-                                    console.error("Image processing error", err);
-                                    const src = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                                    generatedImages.push(src);
+                                        const finalBase64 = await embedMetadata(pngBase64, promptData);
+                                        const src = `data:image/png;base64,${finalBase64}`;
+                                        generatedImages.push(src);
+                                        addToHistory(src, promptData);
+                                    } catch (err) {
+                                        console.error("Image processing error", err);
+                                        const src = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                                        generatedImages.push(src);
+                                    }
                                 }
                             }
                         }
+                    } else if (result.generatedImages) {
+                        // Imagen Format
+                        for (const img of result.generatedImages) {
+                            const promptData: PromptData = { mega: p, lighting: l, scene: s, view: v, inpaint: i, inpaintEnabled: inpaintingPromptToggle.checked, cameraProjection: cameraProjectionEnabled };
+                            try {
+                                let pngBase64 = await convertToPngBase64(img.image.imageBytes, img.image.mimeType || 'image/png');
+                                
+                                if (maskBase64 && uploadedImageData) {
+                                    try {
+                                        pngBase64 = await compositeInpaint(uploadedImageData.data, pngBase64, maskBase64);
+                                    } catch (compErr) {
+                                        console.error("Compositing error", compErr);
+                                    }
+                                }
+
+                                const finalBase64 = await embedMetadata(pngBase64, promptData);
+                                const src = `data:image/png;base64,${finalBase64}`;
+                                generatedImages.push(src);
+                                addToHistory(src, promptData);
+                            } catch (err) {
+                                console.error("Imagen processing error", err);
+                                const src = `data:${img.image.mimeType || 'image/png'};base64,${img.image.imageBytes}`;
+                                generatedImages.push(src);
+                            }
+                        }
                     }
-                }
+                  }
                 if (generatedImages.length > 0) {
                     outputContainer.classList.remove('hidden');
                     showImage(0);
@@ -2709,39 +2793,33 @@ async function runGeneration() {
                     if(statusEl) statusEl.innerText = `Đang tạo ảnh ${k + 1} / ${imageCount}...`;
 
                     try {
-                        // Gọi API tạo từng ảnh một với cơ chế Retry cho lỗi 500 (Internal Server Error)
-                        let result = null;
-                        let retries = 0;
-                        const maxRetries = 2;
-                        
-                        while (retries <= maxRetries) {
-                            try {
-                                result = await ai.models.generateContent({ 
+                        // Gọi API tạo từng ảnh một với cơ chế Retry (via callGemini)
+                        let result = await callGemini(async () => {
+                            if (modelId.startsWith('imagen')) {
+                                return await ai.models.generateImages({
+                                    model: modelId,
+                                    prompt: fullPrompt,
+                                    config: {
+                                        numberOfImages: 1,
+                                        aspectRatio: imageConfig.aspectRatio,
+                                        outputMimeType: 'image/png'
+                                    }
+                                });
+                            } else {
+                                return await ai.models.generateContent({ 
                                     model: modelId, 
                                     contents: { parts: parts }, 
                                     config: { imageConfig: imageConfig } 
                                 });
-                                break; // Thành công thì thoát vòng lặp retry
-                            } catch (retryErr: any) {
-                                const errStr = retryErr.message || JSON.stringify(retryErr);
-                                const is500 = errStr.includes("500") || errStr.includes("Internal Server Error");
-                                
-                                if (is500 && retries < maxRetries) {
-                                    retries++;
-                                    if(statusEl) statusEl.innerText = `Lỗi Server (500). Đang thử lại ${retries}/${maxRetries} (chờ 5s)...`;
-                                    await sleep(5000);
-                                    continue;
-                                }
-                                throw retryErr; // Nếu không phải lỗi 500 hoặc hết lượt retry thì quăng lỗi ra ngoài
                             }
-                        }
+                        });
 
                         if (result) results.push(result);
 
                         // Update Cost (Vertex AI / Tier 1 Pricing)
-                        // Estimate: Pro (Ultra) = $0.012, Banana Pro v1.4 (Pro) = $0.003, Banana Free (Flash) = $0.0007
+                        // Estimate: Pro (Ultra) = $0.012, Banana Pro v1.5 (Pro) = $0.003, Banana Free (Flash) = $0.0007
                         let costPerImg = 0.0007;
-                        if (modelId.includes('pro')) costPerImg = 0.012;
+                        if (modelId.includes('pro') || modelId.includes('imagen')) costPerImg = 0.012;
                         else if (modelId.includes('3.1-flash')) costPerImg = 0.003;
                         
                         // Only track cost if using a Pro/Ultra tier (Tier 1 Billing)
@@ -2803,8 +2881,10 @@ async function runGeneration() {
                     throw e; 
                 }
 
-                // FALLBACK LOGIC for Paid Models (Pro and Banana Pro v1.4) 403/404
-                const isPaidModel = modelId === 'gemini-3-pro-image-preview' || modelId === 'gemini-3.1-flash-image-preview';
+                // FALLBACK LOGIC for Paid Models (Pro, Banana Pro v1.5, and Imagen 4) 403/404
+                const isPaidModel = modelId === 'gemini-3-pro-image-preview' || 
+                                   modelId === 'gemini-3.1-flash-image-preview' || 
+                                   modelId.startsWith('imagen');
                 if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED")) && isPaidModel) {
                      
                      // If manually selected, we still fallback but notify user
@@ -2817,12 +2897,18 @@ async function runGeneration() {
                          if(statusEl) statusEl.innerText = "Paid Model failed. Falling back to Flash (1K)...";
                      }
                      
-                     // If in AI Studio and it's a 403, it might be a key issue
-                     if ((errStr.includes("403") || errStr.includes("PERMISSION_DENIED")) && typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
+                     // If in AI Studio and it's a 403, it's likely a key selection/billing issue
+                     // BUT only prompt if they AREN'T using a manual key (as requested)
+                     if (!manualApiKey && (errStr.includes("403") || errStr.includes("PERMISSION_DENIED")) && typeof window.aistudio !== 'undefined' && window.aistudio.openSelectKey) {
                          console.warn("Permission denied. Offering to open key selection.");
-                         if (await showCustomConfirm("Lỗi 403: Bạn không có quyền sử dụng Model này. Có thể do API Key chưa được kích hoạt thanh toán hoặc không đúng. Bạn có muốn chọn lại API Key không?", "Permission Error")) {
+                         const confirmed = await showCustomConfirm(
+                             "Lỗi 403: Bạn không có quyền sử dụng Model này. Điều này thường do API Key chưa được kích hoạt thanh toán hoặc chưa được chọn đúng trong AI Studio. Bạn có muốn chọn lại API Key ngay bây giờ không?", 
+                             "Permission Error"
+                         );
+                         if (confirmed) {
                              await window.aistudio.openSelectKey();
-                             throw e; // Stop here and let user retry after selecting key
+                             // Reset UI state before returning
+                             return; 
                          }
                      }
                      
@@ -2836,11 +2922,12 @@ async function runGeneration() {
                          for (let k = 0; k < imageCount; k++) {
                             if (!abortController || abortController.signal.aborted) break;
                             
-                            fallbackResults.push(await ai.models.generateContent({ 
+                            const fallbackRes = await callGemini(() => ai.models.generateContent({ 
                                 model: fallbackModelId, 
                                 contents: { parts: parts }, 
                                 config: { imageConfig: fallbackConfig } 
                             }));
+                            fallbackResults.push(fallbackRes);
                             
                             // Update Cost for Fallback (Flash)
                             updateCostDisplay(0.0007);
