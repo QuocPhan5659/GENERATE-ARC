@@ -301,8 +301,11 @@ async function updateAccountStatusUI() {
     // Refresh from storage
     manualApiKey = localStorage.getItem('manualApiKey') || '';
     
-    // Pro status if manual key
-    let isPro = !!(manualApiKey && manualApiKey.length > 10);
+    // Check for AI Studio selected key
+    const hasSelected = typeof window.aistudio !== 'undefined' && await window.aistudio.hasSelectedApiKey();
+    
+    // Pro status if manual key OR AI Studio selected key
+    let isPro = !!(manualApiKey && manualApiKey.length > 10) || hasSelected;
     
     // Update Cost Display Visibility - Only show if using a paid tier (Pro/Ultra)
     if (costDisplayEl) {
@@ -2622,18 +2625,16 @@ async function runGeneration() {
         modelId = selectedModel;
         
         // If Pro model selected, enforce Pro checks
-        if (modelId === 'gemini-3.1-pro-preview') {
-             if (!isPro) {
-                 console.warn("User selected Pro model but no valid Pro key detected.");
-             }
-             if(statusEl) statusEl.innerText = `Generating with Gemini 3.1 Pro...`;
-        } else if (modelId === 'gemini-3.1-flash-image-preview') {
-             // BANANA 2
+        if (modelId === 'gemini-3-pro-image-preview') {
              imageConfig.imageSize = selectedResolution;
-             if(statusEl) statusEl.innerText = `Generating with BANANA 2 (${selectedResolution})...`;
-        } else if (modelId === 'gemini-3-flash-preview') {
-             if(statusEl) statusEl.innerText = `Generating with Gemini 3 Flash...`;
-        } else if (modelId === 'gemini-3.1-flash-lite-preview') {
+             if(statusEl) statusEl.innerText = `Generating with Gemini 3.1 Pro (${selectedResolution})...`;
+        } else if (modelId === 'gemini-3.1-flash-image-preview') {
+             // Gemini 3 Flash / BANANA 2
+             imageConfig.imageSize = selectedResolution;
+             if(statusEl) statusEl.innerText = `Generating with Gemini 3 Flash (${selectedResolution})...`;
+        } else if (modelId === 'gemini-2.5-flash-image') {
+             // Gemini 3 Lite (using 2.5 Flash Image)
+             delete imageConfig.imageSize;
              if(statusEl) statusEl.innerText = `Generating with Gemini 3 Lite...`;
         } else if (modelId.startsWith('imagen')) {
              // IMAGEN 4
@@ -2821,8 +2822,8 @@ async function runGeneration() {
 
                         // Update Cost (Vertex AI / Tier 1 Pricing)
                         let costPerImg = 0.0007; // Default for Flash/Lite
-                        if (modelId.includes('pro') || modelId.includes('imagen')) costPerImg = 0.012;
-                        else if (modelId.includes('3.1-flash-image')) costPerImg = 0.003; // BANANA 2
+                        if (modelId.includes('pro-image') || modelId.includes('imagen')) costPerImg = 0.012;
+                        else if (modelId.includes('3.1-flash-image')) costPerImg = 0.003; // Gemini 3 Flash / BANANA 2
                         
                         // Only track cost if using a Pro/Ultra tier (Tier 1 Billing)
                         if (isPro) updateCostDisplay(costPerImg);
@@ -2888,7 +2889,7 @@ async function runGeneration() {
                 const isPaidModel = modelId.includes('pro') || 
                                    modelId === 'gemini-3.1-flash-image-preview' || 
                                    modelId.startsWith('imagen');
-                if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED")) && isPaidModel) {
+                if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED") || errStr.includes("not found")) && isPaidModel) {
                      
                      // If manually selected, we still fallback but notify user
                      if (selectedModel === modelId) {
