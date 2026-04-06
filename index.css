@@ -1,4 +1,44 @@
 
+/* Custom Scrollbar */
+.custom-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+.custom-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+/* Custom Scrollbar Component */
+.scrollbar-container {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: 16px;
+    background: #121214;
+    border-left: 1px solid #27272a;
+}
+.scrollbar-btn {
+    width: 100%;
+    height: 16px;
+    background: #f5f5f5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+.scrollbar-track {
+    flex: 1;
+    position: relative;
+    background: #f5f5f5;
+}
+.scrollbar-thumb {
+    position: absolute;
+    width: 100%;
+    background: #888;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
 :root {
   --font-body: 'Plus Jakarta Sans', sans-serif;
   --primary-color: #262380; /* rgb(38, 35, 128) */
@@ -85,19 +125,6 @@ body {
     animation: pulse-indigo 2s infinite;
 }
 
-@keyframes pulse-red {
-  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); border-color: rgba(239, 68, 68, 0.5); }
-  70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); border-color: rgba(239, 68, 68, 0.8); }
-  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); border-color: rgba(239, 68, 68, 0.5); }
-}
-
-.api-key-missing {
-    animation: pulse-red 1.5s infinite;
-    background-color: rgba(239, 68, 68, 0.1) !important;
-    color: #fca5a5 !important;
-    border-color: rgba(239, 68, 68, 0.5) !important;
-}
-
 /* Progress Bar Stripes Animation */
 .progress-striped {
     background-image: linear-gradient(45deg,rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%,transparent);
@@ -110,6 +137,15 @@ body {
     100% { background-position: 0 0; }
 }
 
+@keyframes blink-red {
+    0%, 100% { background-color: rgba(220, 38, 38, 0.2); border-color: rgba(220, 38, 38, 0.5); color: #ef4444; }
+    50% { background-color: rgba(220, 38, 38, 0.6); border-color: rgba(220, 38, 38, 1); color: #ffffff; }
+}
+
+.blink-red {
+    animation: blink-red 1s infinite;
+}
+
 /* --- Form Elements --- */
 textarea:focus, select:focus, button:focus, input:focus {
     outline: none;
@@ -118,6 +154,23 @@ textarea:focus, select:focus, button:focus, input:focus {
 /* Animate In */
 .animate-in {
     animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.custom-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.7); }
+  70% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+}
+.pulse-ring {
+  animation: pulse-ring 1.5s infinite;
 }
 
 /* Panning Utilities */

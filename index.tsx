@@ -1,5 +1,6 @@
 /* tslint:disable */
 import { GoogleGenAI } from '@google/genai';
+import exifr from 'exifr';
 
 // --- Global Types & Interfaces ---
 declare global {
@@ -22,6 +23,18 @@ document.addEventListener("DOMContentLoaded", function () {
   if (window.sketchup) {
     window.sketchup.dialog_ready();
   }
+  
+  // Add pulse effect to copy-all-btn on load
+  const applyPulseEffect = () => {
+      const copyAllBtn = document.getElementById('copy-all-btn');
+      if (copyAllBtn) {
+          copyAllBtn.classList.add('pulse-ring');
+      } else {
+          // Retry if not found yet
+          setTimeout(applyPulseEffect, 500);
+      }
+  };
+  applyPulseEffect();
 });
 
 interface PromptData {
@@ -72,7 +85,76 @@ let startX = 0;
 let startY = 0;
 let currentBrushSize = 30; // Reduced default size to 30
 let activeTool = 'brush';
+let isAddingTextMode = false;
+let isTextEraserMode = false;
+let addTextBtn: HTMLButtonElement | null = null;
+let mainAddTextBtn: HTMLButtonElement | null = null;
+let eraserTextBtn: HTMLButtonElement | null = null;
+let mainEraserTextBtn: HTMLButtonElement | null = null;
+let textOverlayInput: HTMLInputElement | null = null;
+let zoomTextCanvas: HTMLCanvasElement | null = null;
+let zoomTextCtx: CanvasRenderingContext2D | null = null;
+let mainTextCanvas: HTMLCanvasElement | null = null;
+let mainTextCtx: CanvasRenderingContext2D | null = null;
+let mainTextOverlayInput: HTMLInputElement | null = null;
+let mainTextColorInput: HTMLInputElement | null = null;
+let mainTextSizeInput: HTMLInputElement | null = null;
+let mainDeleteTextBtn: HTMLButtonElement | null = null;
+let mainResetTextBtn: HTMLButtonElement | null = null;
+let deleteTextBtn: HTMLButtonElement | null = null;
+let dragOffsetX = 0;
+let dragOffsetY = 0;
+let textElements: Array<{ text: string, x: number, y: number, w: number, h: number, color: string, size: number }> = [];
+let draggedTextIndex = -1;
+let editingTextIndex = -1;
+let selectedTextIndex = -1;
+let isCopying = false;
+
+function redrawText() {
+    if (!zoomTextCtx || !mainTextCtx || !zoomTextCanvas || !mainTextCanvas) return;
+    zoomTextCtx.clearRect(0, 0, zoomTextCanvas.width, zoomTextCanvas.height);
+    mainTextCtx.clearRect(0, 0, mainTextCanvas.width, mainTextCanvas.height);
+    
+    textElements.forEach((el, index) => {
+        // Draw on Zoom Canvas
+        zoomTextCtx.font = `bold ${el.size}px Arial`;
+        zoomTextCtx.fillStyle = el.color;
+        zoomTextCtx.textBaseline = 'top';
+        zoomTextCtx.fillText(el.text, el.x, el.y);
+        
+        if (index === draggedTextIndex || index === editingTextIndex || index === selectedTextIndex) {
+            zoomTextCtx.strokeStyle = index === selectedTextIndex ? '#f59e0b' : 'rgba(255,255,255,0.5)';
+            zoomTextCtx.lineWidth = 2;
+            zoomTextCtx.strokeRect(el.x - 2, el.y - 2, el.w + 4, el.h + 4);
+        }
+
+        // Draw on Main Canvas
+        mainTextCtx.font = `bold ${el.size}px Arial`;
+        mainTextCtx.fillStyle = el.color;
+        mainTextCtx.textBaseline = 'top';
+        mainTextCtx.fillText(el.text, el.x, el.y);
+
+        if (index === selectedTextIndex) {
+            mainTextCtx.strokeStyle = '#f59e0b';
+            mainTextCtx.lineWidth = 2;
+            mainTextCtx.strokeRect(el.x - 2, el.y - 2, el.w + 4, el.h + 4);
+        }
+    });
+
+    // Update delete button visibility
+    if (selectedTextIndex !== -1) {
+        deleteTextBtn?.classList.remove('hidden');
+        mainDeleteTextBtn?.classList.remove('hidden');
+    } else {
+        deleteTextBtn?.classList.add('hidden');
+        mainDeleteTextBtn?.classList.add('hidden');
+    }
+}
+
 let lassoPoints: Array<{ x: number; y: number }> = [];
+let polygonPoints: Array<{ x: number; y: number }> = [];
+let isDrawingPolygon = false;
+let drawRequest: number | null = null;
 
 // --- Screenshot State ---
 let snapshotImage: ImageBitmap | null = null;
@@ -96,47 +178,27 @@ window.addEventListener('mousemove', (e) => {
     globalMouseY = e.clientY;
 });
 
-// --- Initialization Logic ---
-document.title = "Banana Pro Studio";
-// API Key handled via process.env.API_KEY OR Manual Input
-let manualApiKey = localStorage.getItem('manualApiKey') || '';
+// --- Comparison Logic ---
+let isComparisonMode = false;
+
+function updateComparisonImages() {
+    if (isComparisonMode) {
+        if (uploadedImageData) {
+            compareImg1.src = `data:${uploadedImageData.mimeType};base64,${uploadedImageData.data}`;
+        }
+        if (generatedImages.length > 0 && currentImageIndex >= 0 && currentImageIndex < generatedImages.length) {
+            compareImg2.src = generatedImages[currentImageIndex];
+        } else if (generatedImages.length > 0) {
+            compareImg2.src = generatedImages[generatedImages.length - 1];
+        }
+    }
+}
 
 const getGenAI = () => {
     // Priority: Manual Key -> Selected Key (API_KEY) -> Default Key (GEMINI_API_KEY)
     const keyToUse = manualApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY;
     return new GoogleGenAI({ apiKey: keyToUse });
 };
-
-/**
- * Helper function to call Gemini API with retry logic for 500 and 503 errors.
- */
-async function callWithRetry<T>(apiCall: () => Promise<T>, maxRetries: number = 15): Promise<T> {
-    let retries = 0;
-    while (true) {
-        try {
-            return await apiCall();
-        } catch (err: any) {
-            const errStr = err.message || JSON.stringify(err);
-            const isRetryable = errStr.includes("500") || errStr.includes("503") || errStr.includes("429") || 
-                               errStr.includes("Internal Server Error") || 
-                               errStr.includes("high demand") ||
-                               errStr.includes("UNAVAILABLE") ||
-                               errStr.includes("Quota exceeded") ||
-                               errStr.includes("overloaded") ||
-                               errStr.includes("deadline exceeded");
-            
-            if (isRetryable && retries < maxRetries) {
-                retries++;
-                // Exponential backoff with jitter
-                const delay = Math.min(Math.pow(2, retries) * 1500 + Math.random() * 3000, 45000); 
-                if (statusEl) statusEl.innerText = `API Busy/High Demand (${retries}/${maxRetries}). Retrying in ${Math.round(delay/1000)}s...`;
-                await new Promise(resolve => setTimeout(resolve, delay));
-                continue;
-            }
-            throw err;
-        }
-    }
-}
 
 // --- DOM Elements ---
 const statusEl = document.querySelector('#status') as HTMLDivElement;
@@ -162,32 +224,42 @@ const prevZoomBtn = document.querySelector('#prev-zoom-btn') as HTMLButtonElemen
 const nextZoomBtn = document.querySelector('#next-zoom-btn') as HTMLButtonElement;
 const imageCounterBadge = document.querySelector('#image-counter-badge') as HTMLDivElement;
 
-// Cost Tracking
+// Image Count Tracking
 const costDisplayEl = document.querySelector('#cost-display') as HTMLDivElement;
-const totalCostValEl = document.querySelector('#total-cost-val') as HTMLSpanElement;
-let totalUsageCost = parseFloat(localStorage.getItem('banana_usage_cost') || '0');
+const totalImagesValEl = document.querySelector('#total-images-val') as HTMLSpanElement;
+const todayImagesValEl = document.querySelector('#today-images-val') as HTMLSpanElement;
 
-const updateCostDisplay = (addedCost: number = 0) => {
-    totalUsageCost += addedCost;
-    localStorage.setItem('banana_usage_cost', totalUsageCost.toFixed(6));
+let totalImagesGenerated = parseInt(localStorage.getItem('total_images_generated') || '0');
+let imagesGeneratedToday = parseInt(localStorage.getItem(`images_generated_${new Date().toISOString().split('T')[0]}`) || '0');
+
+const updateImageCountDisplay = (addedCount: number = 0) => {
+    totalImagesGenerated += addedCount;
+    imagesGeneratedToday += addedCount;
     
-    if (totalCostValEl) {
-        totalCostValEl.innerText = `$${totalUsageCost.toFixed(3)}`;
-        // Always emerald for accumulation
-        totalCostValEl.classList.remove('text-red-400');
-        totalCostValEl.classList.add('text-emerald-400');
+    localStorage.setItem('total_images_generated', totalImagesGenerated.toString());
+    localStorage.setItem(`images_generated_${new Date().toISOString().split('T')[0]}`, imagesGeneratedToday.toString());
+    
+    if (totalImagesValEl) {
+        totalImagesValEl.innerText = `Total: ${totalImagesGenerated}`;
+    }
+    if (todayImagesValEl) {
+        todayImagesValEl.innerText = `Today: ${imagesGeneratedToday}`;
     }
 };
 
-const resetCost = () => {
-    totalUsageCost = 0;
-    updateCostDisplay(0);
+const resetImageCount = () => {
+    totalImagesGenerated = 0;
+    imagesGeneratedToday = 0;
+    localStorage.setItem('total_images_generated', '0');
+    localStorage.setItem(`images_generated_${new Date().toISOString().split('T')[0]}`, '0');
+    updateImageCountDisplay(0);
 };
 
-// Initialize Cost Display
-updateCostDisplay(0);
+// Initialize Image Count Display
+updateImageCountDisplay(0);
 
 // API Key UI Elements
+let manualApiKey = localStorage.getItem('manualApiKey') || '';
 const apiKeyBtn = document.querySelector('#api-key-btn') as HTMLButtonElement;
 const apiKeyModal = document.querySelector('#api-key-modal') as HTMLDivElement;
 const closeApiKeyBtn = document.querySelector('#close-api-key-btn') as HTMLButtonElement;
@@ -201,6 +273,14 @@ const customAlertTitle = document.querySelector('#custom-alert-title') as HTMLHe
 const customAlertMessage = document.querySelector('#custom-alert-message') as HTMLParagraphElement;
 const customAlertOk = document.querySelector('#custom-alert-ok') as HTMLButtonElement;
 
+// --- Comparison Elements ---
+const compareToggleBtn = document.querySelector('#compare-toggle-btn') as HTMLButtonElement;
+const comparisonContainer = document.querySelector('#comparison-container') as HTMLDivElement;
+const compareSlider = document.querySelector('#compare-slider') as HTMLInputElement;
+const compareImg1 = document.querySelector('#compare-img-1') as HTMLImageElement;
+const compareImg2 = document.querySelector('#compare-img-2') as HTMLImageElement;
+const compareImg2Wrapper = document.querySelector('#compare-img-2-wrapper') as HTMLDivElement;
+
 const customConfirmModal = document.querySelector('#custom-confirm-modal') as HTMLDivElement;
 const customConfirmTitle = document.querySelector('#custom-confirm-title') as HTMLHeadingElement;
 const customConfirmMessage = document.querySelector('#custom-confirm-message') as HTMLParagraphElement;
@@ -211,18 +291,72 @@ const customPasteModal = document.querySelector('#custom-paste-modal') as HTMLDi
 const customPasteTextarea = document.querySelector('#custom-paste-textarea') as HTMLTextAreaElement;
 const customPasteSubmit = document.querySelector('#custom-paste-submit') as HTMLButtonElement;
 const closePasteModal = document.querySelector('#close-paste-modal') as HTMLButtonElement;
+const modalCopyBtn = document.querySelector('#modal-copy-btn') as HTMLButtonElement;
+const copyAllBtn = document.querySelector('#copy-all-btn') as HTMLButtonElement;
 const modalPasteBtn = document.querySelector('#modal-paste-btn') as HTMLButtonElement;
 
-function showCustomAlert(message: string, title: string = "Notification") {
+// --- PNG Info Viewport Elements ---
+const pngInfoTabBtn = document.querySelector('#png-info-tab-btn') as HTMLButtonElement;
+const pngInfoViewport = document.querySelector('#png-info-viewport') as HTMLDivElement;
+const pngInfoViewportTop = document.querySelector('#png-info-viewport-top') as HTMLDivElement;
+const pngInfoViewportBottom = document.querySelector('#png-info-viewport-bottom') as HTMLDivElement;
+const pngInfoContentTop = document.querySelector('#png-info-content-top') as HTMLDivElement;
+const pngInfoContentBottom = document.querySelector('#png-info-content-bottom') as HTMLDivElement;
+const pngInfoCopyBtnTop = document.querySelector('#png-info-copy-btn-top') as HTMLButtonElement;
+const pngInfoPasteBtnTop = document.querySelector('#png-info-paste-btn-top') as HTMLButtonElement;
+const pngInfoClearBtnTop = document.querySelector('#png-info-clear-btn-top') as HTMLButtonElement;
+const pngInfoCopyBtnBottom = document.querySelector('#png-info-copy-btn-bottom') as HTMLButtonElement;
+const pngInfoPasteBtnBottom = document.querySelector('#png-info-paste-btn-bottom') as HTMLButtonElement;
+const pngInfoClearBtnBottom = document.querySelector('#png-info-clear-btn-bottom') as HTMLButtonElement;
+const pngInfoCloseBtn = document.querySelector('#png-info-close-btn') as HTMLButtonElement;
+const pngInfoSendBtn = document.querySelector('#png-info-send-btn') as HTMLButtonElement;
+const pngInfoTemplateBtnTop = document.querySelector('#png-info-template-btn-top') as HTMLButtonElement;
+const pngInfoTemplateBtnBottom = document.querySelector('#png-info-template-btn-bottom') as HTMLButtonElement;
+const pngInfoFontSelect = document.querySelector('#png-info-font-select') as HTMLSelectElement;
+const pngInfoSizeInput = document.querySelector('#png-info-size-input') as HTMLInputElement;
+const pngInfoDownloadDataBtn = document.querySelector('#png-info-download-data-btn') as HTMLButtonElement;
+const pngInfoDownloadTxtBtn = document.querySelector('#png-info-download-txt-btn') as HTMLButtonElement;
+const pngInfoDropZoneTop = document.querySelector('#png-info-drop-zone-top') as HTMLDivElement;
+const pngInfoFileInputTop = document.querySelector('#png-info-file-input-top') as HTMLInputElement;
+
+// --- Collage Extract Elements ---
+const collageExtractToggle = document.querySelector('#collage-extract-toggle') as HTMLInputElement;
+const collageExtractControls = document.querySelector('#collage-extract-controls') as HTMLDivElement;
+const collagePositionSelect = document.querySelector('#collage-position-select') as HTMLSelectElement;
+const extractViewBtn = document.querySelector('#extract-view-btn') as HTMLButtonElement;
+
+const COLLAGE_EXTRACT_PROMPT_TEMPLATE = `This image is a multi-frame collage. First detect the full collage layout and identify the exact rectangular boundary of every frame, whether the frames are separated by visible borders, thin gaps, or no visible dividing lines at all. Determine boundaries only from the overall collage structure, panel alignment, and layout geometry, not from the visual content inside the images. Then extract only the [ TARGET POSITION ] frame as one complete rectangular image. Strictly exclude all neighboring frames and do not include any pixels, objects, edges, or partial areas from adjacent images. Do not merge across frame boundaries even if colors, lines, or objects visually continue. Preserve the extracted frame exactly at its original internal resolution and original quality, with no resizing, no recompression, no denoise, no blur, no sharpening, no enhancement, and no content alteration.`;
+
+function showCustomAlert(message: string, title: string = "SUCCESS") {
     if (!customAlertModal) return;
+    
+    // Update icon to green tick
+    const iconContainer = document.getElementById('custom-alert-icon');
+    if (iconContainer) {
+        iconContainer.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>`;
+    }
+    
     customAlertTitle.innerText = title;
+    customAlertTitle.classList.add('text-amber-500');
+    customAlertTitle.classList.remove('text-white');
+    
     customAlertMessage.innerText = message;
+    customAlertMessage.classList.add('text-amber-400');
+    customAlertMessage.classList.remove('text-gray-400');
+    
     customAlertModal.classList.remove('hidden');
     
     return new Promise<void>((resolve) => {
         const handleOk = () => {
             customAlertModal.classList.add('hidden');
             customAlertOk.removeEventListener('click', handleOk);
+            
+            // Reset to default styles for next time
+            customAlertTitle.classList.remove('text-amber-500');
+            customAlertTitle.classList.add('text-white');
+            customAlertMessage.classList.remove('text-amber-400');
+            customAlertMessage.classList.add('text-gray-400');
+            
             resolve();
         };
         customAlertOk.addEventListener('click', handleOk);
@@ -299,14 +433,10 @@ function showCustomPaste(): Promise<string | null> {
 async function updateAccountStatusUI() {
     if (!accountTierBadge) return;
     
-    // Refresh from storage
+    // Check if key is selected via manual input
     manualApiKey = localStorage.getItem('manualApiKey') || '';
     
-    // Check for AI Studio selected key
-    const hasSelected = typeof window.aistudio !== 'undefined' && await window.aistudio.hasSelectedApiKey();
-    
-    // Pro status if manual key OR AI Studio selected key
-    let isPro = !!(manualApiKey && manualApiKey.length > 10) || hasSelected;
+    let isPro = !!(manualApiKey && manualApiKey.length > 10);
     
     // Update Cost Display Visibility - Only show if using a paid tier (Pro/Ultra)
     if (costDisplayEl) {
@@ -319,43 +449,53 @@ async function updateAccountStatusUI() {
         }
     }
 
-    // Update API Key management UI
-    accountTierBadge.classList.remove('hidden');
-    
+    // Clear previous styles
+    accountTierBadge.className = '';
+    accountTierBadge.classList.remove('hidden', 'blink-red');
+    accountTierBadge.innerHTML = ''; 
+
     if (isPro) {
-        // PRO STATE - Blue/Purple Pill (as in the image)
+        // PRO STATE - Blue/Purple Pill
         accountTierBadge.className = 'flex items-center gap-2 px-4 py-1.5 rounded-full border border-[#4f46e5]/50 bg-[#1e1b4b]/60 text-white shadow-[0_0_15px_rgba(79,70,229,0.25)] cursor-pointer hover:bg-[#1e1b4b]/80 transition-all group';
         accountTierBadge.innerHTML = `
-            <div class="w-4 h-4 rounded-full bg-cyan-400 flex items-center justify-center shadow-[0_0_8px_rgba(34,211,238,0.6)]">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5 text-[#1e1b4b]" viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
-                </svg>
-            </div>
-            <span class="text-[10px] font-black tracking-[0.1em] text-white">PRO</span>
-        `;
-    } else {
-        // MISSING KEY - Red Blinking State
-        accountTierBadge.className = 'flex items-center gap-2 px-4 py-1.5 rounded-full border border-red-500/50 bg-red-900/20 text-red-400 cursor-pointer transition-all group api-key-missing';
-        accountTierBadge.innerHTML = `
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-cyan-400 drop-shadow-[0_0_2px_rgba(34,211,238,0.8)]" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
             </svg>
-            <span class="text-[10px] font-black tracking-[0.1em] uppercase">ADD API KEY</span>
+            <span class="text-[10px] font-black tracking-[0.2em] text-[#e0e7ff]">PRO</span>
         `;
-    }
-
-    accountTierBadge.onclick = () => {
-        if (apiKeyModal) {
-            manualApiKeyInput.value = manualApiKey; 
-            const removeBtn = document.getElementById('remove-api-key-btn');
-            if(removeBtn) {
-                if (manualApiKey) removeBtn.classList.remove('hidden');
-                else removeBtn.classList.add('hidden');
+        
+        accountTierBadge.onclick = () => {
+             if (apiKeyModal) {
+                manualApiKeyInput.value = manualApiKey; 
+                const removeBtn = document.getElementById('remove-api-key-btn');
+                if(removeBtn) {
+                    if (manualApiKey) removeBtn.classList.remove('hidden');
+                    else removeBtn.classList.add('hidden');
+                }
+                apiKeyModal.classList.remove('hidden');
+                manualApiKeyInput.focus();
             }
-            apiKeyModal.classList.remove('hidden');
-            manualApiKeyInput.focus();
-        }
-    };
+        };
+
+    } else {
+        // FREE STATE - Blinking Red "API KEY"
+        accountTierBadge.className = 'flex items-center gap-2 px-4 py-1.5 rounded-full border border-red-500/50 bg-red-900/20 text-red-400 cursor-pointer transition-all group blink-red';
+        accountTierBadge.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
+            <span class="text-[10px] font-black tracking-[0.2em]">API KEY</span>
+        `;
+        accountTierBadge.onclick = () => {
+             if (apiKeyModal) {
+                manualApiKeyInput.value = manualApiKey; 
+                const removeBtn = document.getElementById('remove-api-key-btn');
+                if(removeBtn) removeBtn.classList.add('hidden');
+                apiKeyModal.classList.remove('hidden');
+                manualApiKeyInput.focus();
+            }
+        };
+    }
 }
 
 // Call on load
@@ -403,18 +543,18 @@ if (saveApiKeyBtn && manualApiKeyInput) {
             try {
                 // Perform a dummy check (lightweight generation)
                 const tempAi = new GoogleGenAI({ apiKey: key });
-                await callWithRetry(() => tempAi.models.generateContent({
+                await tempAi.models.generateContent({
                     model: 'gemini-3-flash-preview',
                     contents: { parts: [{ text: "ping" }] },
                     config: { maxOutputTokens: 1 }
-                }), 3); // Thử lại 3 lần cho bước xác thực
+                });
 
                 // Valid - Update State
                 manualApiKey = key;
                 localStorage.setItem('manualApiKey', key);
                 
                 // Reset Cost on Key Change
-                resetCost();
+                resetImageCount();
                 
                 // Immediately update Badge UI
                 updateAccountStatusUI();
@@ -468,6 +608,17 @@ const helpBtn = document.querySelector('#help-btn') as HTMLButtonElement;
 const helpModal = document.querySelector('#help-modal') as HTMLDivElement;
 const closeHelpBtn = document.querySelector('#close-help-btn') as HTMLButtonElement;
 
+// GPT Elements
+const gptBtn = document.querySelector('#gpt-info-btn') as HTMLButtonElement;
+const gptModal = document.querySelector('#gpt-modal') as HTMLDivElement;
+const closeGptBtn = document.querySelector('#close-gpt-btn') as HTMLButtonElement;
+const closeGptOkBtn = document.querySelector('#close-gpt-ok-btn') as HTMLButtonElement;
+const gptImgBtn = document.querySelector('#gpt-img-btn') as HTMLButtonElement;
+const gptVideoBtn = document.querySelector('#gpt-video-btn') as HTMLButtonElement;
+const gptInstructionContainer = document.querySelector('#gpt-instruction-container') as HTMLDivElement;
+const gptInstructionText = document.querySelector('#gpt-instruction-text') as HTMLParagraphElement;
+const gptInstructionCommand = document.querySelector('#gpt-instruction-command') as HTMLParagraphElement;
+
 // Add Listeners
 if (helpBtn && helpModal && closeHelpBtn) {
     helpBtn.addEventListener('click', (e) => {
@@ -483,9 +634,115 @@ if (helpBtn && helpModal && closeHelpBtn) {
     });
 }
 
+if (gptBtn && gptModal) {
+    gptBtn.addEventListener('click', () => {
+        gptModal.classList.remove('hidden');
+    });
+    
+    closeGptBtn.addEventListener('click', () => {
+        gptModal.classList.add('hidden');
+    });
+
+    gptImgBtn.addEventListener('click', () => {
+        gptImgBtn.className = 'flex-1 bg-[#262380] text-white font-black py-2 rounded-xl text-xs uppercase tracking-widest transition-all';
+        gptVideoBtn.className = 'flex-1 bg-white/5 hover:bg-white/10 text-gray-400 font-black py-2 rounded-xl text-xs uppercase tracking-widest transition-all';
+        gptInstructionText.innerText = 'Hãy phân tích thật chi tiết bức ảnh tôi vừa gửi và viết ngược lại thành 1 câu Prompt tiếng Anh (Image-to-Prompt) để tôi dùng cho các AI tạo ảnh siêu thực cho hình ảnh ngành Kiến Trúc - Nội Thất. Bao gồm mô tả: Chủ thể chính, Phong cách Kiến Trúc / Không Gian Nội Thất, Ánh sáng (Lighting), Bố cục (Composition), Góc Chụp và Môi trường, Tỷ Lệ Khung Ảnh.';
+        gptInstructionCommand.innerText = 'LỆNH BẮT BUỘC: CHỈ TRẢ VỀ ĐÚNG 1 CÂU PROMPT TIẾNG ANH LIÊN TỤC NẰM TRONG 1 ĐOẠN VĂN, KHÔNG XUỐNG DÒNG, KHÔNG GIẢI THÍCH, KHÔNG CHÀO HỎI. Chỉ nhả ra Text để tôi copy.';
+    });
+
+    gptVideoBtn.addEventListener('click', () => {
+        gptVideoBtn.className = 'flex-1 bg-[#262380] text-white font-black py-2 rounded-xl text-xs uppercase tracking-widest transition-all';
+        gptImgBtn.className = 'flex-1 bg-white/5 hover:bg-white/10 text-gray-400 font-black py-2 rounded-xl text-xs uppercase tracking-widest transition-all';
+        gptInstructionText.innerText = 'Hãy phân tích thật chi tiết bức ảnh tôi vừa gửi và viết ngược lại thành Prompt tiếng Anh (Image-to-Prompt) để tôi dùng cho các AI tạo VIDEO.';
+        gptInstructionCommand.innerText = 'LỆNH BẮT BUỘC: CHỈ TRẢ VỀ ĐÚNG 1 CÂU PROMPT TIẾNG ANH LIÊN TỤC NẰM TRONG 1 ĐOẠN VĂN, KHÔNG XUỐNG DÒNG, KHÔNG GIẢI THÍCH, KHÔNG CHÀO HỎI. Chỉ nhả ra Text để tôi copy.';
+    });
+
+    if (closeGptOkBtn) {
+        closeGptOkBtn.addEventListener('click', () => {
+            // Đọc trực tiếp nội dung từ các phần tử con để đảm bảo lấy được nội dung mới nhất
+            const textPart = gptInstructionText.textContent || "";
+            const commandPart = gptInstructionCommand.textContent || "";
+            const promptText = textPart.trim() + "\n\n" + commandPart.trim();
+            
+            // Direct approach for better SketchUp compatibility
+            const textArea = document.createElement("textarea");
+            textArea.value = promptText;
+            textArea.style.position = "fixed";
+            textArea.style.left = "-9999px";
+            textArea.style.top = "0";
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            
+            try {
+                const successful = document.execCommand('copy');
+                if (successful) {
+                    gptModal.classList.add('hidden');
+                } else {
+                    console.error('Copy command failed');
+                }
+            } catch (err) {
+                console.error('Failed to copy', err);
+            }
+            document.body.removeChild(textArea);
+        });
+    }
+    gptModal.addEventListener('click', (e) => {
+        if (e.target === gptModal) gptModal.classList.add('hidden');
+    });
+}
+
 // Translation Buttons
 const langBtnVn = document.querySelector('#lang-btn-vn') as HTMLButtonElement;
 const langBtnEn = document.querySelector('#lang-btn-en') as HTMLButtonElement;
+const togglePromptModifiersBtn = document.querySelector('#toggle-prompt-modifiers') as HTMLButtonElement;
+const promptManual = document.querySelector('#prompt-manual') as HTMLTextAreaElement;
+const pngInfoToggleModifiersTop = document.querySelector('#png-info-toggle-modifiers-top') as HTMLButtonElement;
+const promptModifiers = "photorealistic, ultra detailed, sharp focus, 8k, crisp details, realistic materials, clean edges, precise geometry, global illumination, natural lighting, high detail textures, professional photography --no blurry, low quality, noise, soft focus, distorted, bad texture, artifacts";
+
+if (togglePromptModifiersBtn && promptManual) {
+    togglePromptModifiersBtn.addEventListener('click', () => {
+        const currentVal = promptManual.value;
+        if (currentVal.includes(promptModifiers)) {
+            // Remove
+            promptManual.value = currentVal.replace(promptModifiers, '').replace(/,\s*$/, '').trim();
+        } else {
+            // Append
+            promptManual.value = (currentVal + (currentVal.trim().length > 0 ? ', ' : '') + promptModifiers).trim();
+        }
+        // Trigger auto-resize if the function exists
+        // @ts-ignore
+        if (typeof autoResize === 'function') autoResize(promptManual);
+    });
+}
+
+if (pngInfoToggleModifiersTop && pngInfoContentTop) {
+    pngInfoToggleModifiersTop.addEventListener('click', () => {
+        const currentVal = pngInfoContentTop.innerText;
+        if (currentVal.includes(promptModifiers)) {
+            // Remove
+            pngInfoContentTop.innerText = currentVal.replace(promptModifiers, '').replace(/,\s*$/, '').trim();
+        } else {
+            // Append
+            pngInfoContentTop.innerText = (currentVal + (currentVal.trim().length > 0 ? ', ' : '') + promptModifiers).trim();
+        }
+    });
+}
+
+const pngInfoToggleModifiersBottom = document.querySelector('#png-info-toggle-modifiers-bottom') as HTMLButtonElement;
+
+if (pngInfoToggleModifiersBottom && pngInfoContentBottom) {
+    pngInfoToggleModifiersBottom.addEventListener('click', () => {
+        const currentVal = pngInfoContentBottom.innerText;
+        if (currentVal.includes(promptModifiers)) {
+            // Remove
+            pngInfoContentBottom.innerText = currentVal.replace(promptModifiers, '').replace(/,\s*$/, '').trim();
+        } else {
+            // Append
+            pngInfoContentBottom.innerText = (currentVal + (currentVal.trim().length > 0 ? ', ' : '') + promptModifiers).trim();
+        }
+    });
+}
 
 // Inpainting UI
 const inpaintingPromptToggle = document.querySelector('#inpainting-prompt-toggle') as HTMLInputElement;
@@ -502,6 +759,8 @@ const screenshotCanvas = document.querySelector('#screenshot-canvas') as HTMLCan
 
 // Canvas Elements
 const maskCanvas = document.querySelector('#mask-canvas') as HTMLCanvasElement;
+mainTextCanvas = document.querySelector('#main-text-canvas') as HTMLCanvasElement;
+mainTextCtx = mainTextCanvas.getContext('2d')!;
 const guideCanvas = document.querySelector('#guide-canvas') as HTMLCanvasElement;
 const maskPreviewCanvas = document.querySelector('#mask-preview-canvas') as HTMLCanvasElement;
 const brushCursor = document.querySelector('#brush-cursor') as HTMLDivElement;
@@ -531,6 +790,8 @@ const clearMaskBtn = document.querySelector('#clear-mask') as HTMLButtonElement;
 const toolbarClearBtn = document.querySelector('#clear-mask-toolbar') as HTMLButtonElement;
 const removeImageBtn = document.querySelector('#remove-image') as HTMLButtonElement;
 const removeImageOverlayBtn = document.querySelector('#remove-image-overlay-btn') as HTMLButtonElement;
+eraserTextBtn = document.querySelector('#eraser-text-btn') as HTMLButtonElement;
+mainEraserTextBtn = document.querySelector('#main-eraser-text-btn') as HTMLButtonElement;
 const brushSlider = document.querySelector('#brush-size-slider') as HTMLInputElement;
 const brushSizeVal = document.querySelector('#brush-size-val') as HTMLSpanElement;
 const toolBtns = document.querySelectorAll('.tool-btn') as NodeListOf<HTMLButtonElement>;
@@ -566,6 +827,65 @@ const cameraProjToggle = document.querySelector('#camera-projection-toggle') as 
 
 // History Label for Clear
 const historyLabelContainer = document.querySelector('#history-label-container') as HTMLDivElement;
+
+// --- Undo/Redo for contenteditable ---
+const undoStacks = new Map<HTMLElement, string[]>();
+const undoIndex = new Map<HTMLElement, number>();
+
+function setupUndo(el: HTMLElement) {
+    undoStacks.set(el, [el.innerHTML]);
+    undoIndex.set(el, 0);
+
+    el.addEventListener('input', () => {
+        const stack = undoStacks.get(el)!;
+        let index = undoIndex.get(el)!;
+        
+        // If we are in the middle of the stack, remove future states
+        if (index < stack.length - 1) {
+            stack.splice(index + 1);
+        }
+        
+        stack.push(el.innerHTML);
+        undoIndex.set(el, stack.length - 1);
+        
+        if (stack.length > 50) { // Limit history
+            stack.shift();
+            undoIndex.set(el, stack.length - 1);
+        }
+    });
+
+    el.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+            e.preventDefault();
+            const stack = undoStacks.get(el)!;
+            let index = undoIndex.get(el)!;
+            
+            if (index > 0) {
+                index--;
+                undoIndex.set(el, index);
+                el.innerHTML = stack[index];
+            }
+        }
+    });
+}
+
+// Initialize Undo for PNG Info
+if (pngInfoContentTop) {
+    setupUndo(pngInfoContentTop);
+    pngInfoContentTop.addEventListener('paste', (e) => {
+        e.preventDefault();
+        const text = e.clipboardData?.getData('text/plain') || '';
+        document.execCommand('insertText', false, text);
+    });
+}
+if (pngInfoContentBottom) {
+    setupUndo(pngInfoContentBottom);
+    pngInfoContentBottom.addEventListener('paste', (e) => {
+        e.preventDefault();
+        const text = e.clipboardData?.getData('text/plain') || '';
+        document.execCommand('insertText', false, text);
+    });
+}
 
 function autoResize(el: HTMLTextAreaElement) {
     if (!el) return;
@@ -640,14 +960,14 @@ async function translatePrompt(targetLang: 'VN' | 'EN') {
         const ai = getGenAI();
 
         // Using gemini-3-flash-preview for text tasks as requested
-        const response = await callWithRetry(() => ai.models.generateContent({
+        const response = await ai.models.generateContent({
             model: 'gemini-3-flash-preview', 
             contents: { parts: [{ text: `Translate this JSON: ${jsonStr}` }] },
             config: { 
                 systemInstruction: systemPrompt,
                 responseMimeType: 'application/json'
             }
-        }));
+        });
 
         if (response.text) {
             // Clean up Markdown code blocks if present
@@ -697,6 +1017,22 @@ if (langBtnEn) langBtnEn.addEventListener('click', () => translatePrompt('EN'));
 
 // --- Icon Button Logic ---
 
+async function translateTextGeneric(text: string, targetLang: 'VN' | 'EN'): Promise<string> {
+    const ai = getGenAI();
+    const systemPrompt = targetLang === 'VN' 
+        ? `You are a professional translator. Translate the human-readable text content within the provided HTML string. You MUST strictly preserve all HTML tags, attributes, classes, and inline styles. Do not modify the structure, layout, or colors. Return ONLY the translated HTML string.`
+        : `You are a professional translator. Translate the human-readable text content within the provided HTML string. You MUST strictly preserve all HTML tags, attributes, classes, and inline styles. Do not modify the structure, layout, or colors. Return ONLY the translated HTML string.`;
+
+    const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview', 
+        contents: { parts: [{ text: text }] },
+        config: { 
+            systemInstruction: systemPrompt,
+        }
+    });
+    return response.text || text;
+}
+
 async function copyToClipboard(text: string): Promise<boolean> {
     try {
         await navigator.clipboard.writeText(text);
@@ -729,9 +1065,13 @@ copyBtns.forEach(btn => {
         if (el && el.value) {
             const success = await copyToClipboard(el.value);
             if (success) {
-                const originalColor = btn.style.color;
-                btn.style.color = '#4ade80'; 
-                setTimeout(() => btn.style.color = originalColor, 1000);
+                const originalContent = btn.innerHTML;
+                btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>';
+                btn.style.color = '#4ade80';
+                setTimeout(() => {
+                    btn.innerHTML = originalContent;
+                    btn.style.color = '';
+                }, 1000);
             }
         }
     });
@@ -748,12 +1088,28 @@ pasteBtns.forEach(btn => {
                 if (!text) throw new Error("Empty clipboard");
                 el.value = text;
                 autoResize(el);
+                
+                const originalContent = btn.innerHTML;
+                btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>';
+                btn.style.color = '#4ade80';
+                setTimeout(() => {
+                    btn.innerHTML = originalContent;
+                    btn.style.color = '';
+                }, 1000);
             } catch (err) { 
                 console.warn('Clipboard read failed, opening manual paste modal', err); 
                 const pastedText = await showCustomPaste();
                 if (pastedText) {
                     el.value = pastedText;
                     autoResize(el);
+                    
+                    const originalContent = btn.innerHTML;
+                    btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>';
+                    btn.style.color = '#4ade80';
+                    setTimeout(() => {
+                        btn.innerHTML = originalContent;
+                        btn.style.color = '';
+                    }, 1000);
                 }
             }
         }
@@ -771,9 +1127,22 @@ clearTextBtns.forEach(btn => {
 exportBtns.forEach(btn => {
     btn.addEventListener('click', () => {
         const targetId = btn.getAttribute('data-target');
-        const el = document.getElementById(targetId!) as HTMLTextAreaElement;
-        if (el && el.value) {
-            const blob = new Blob([el.value], { type: 'text/plain' });
+        let textToExport = '';
+        
+        if (targetId === 'all-prompts') {
+            const prompt = (document.getElementById('prompt-manual') as HTMLTextAreaElement)?.value || '';
+            const lighting = (document.getElementById('lighting-manual') as HTMLTextAreaElement)?.value || '';
+            const scene = (document.getElementById('scene-manual') as HTMLTextAreaElement)?.value || '';
+            const view = (document.getElementById('view-manual') as HTMLTextAreaElement)?.value || '';
+            
+            textToExport = `PROMPT: ${prompt}\n\nLIGHTING: ${lighting}\n\nSCENE: ${scene}\n\nVIEW: ${view}`;
+        } else {
+            const el = document.getElementById(targetId!) as HTMLTextAreaElement;
+            if (el) textToExport = el.value;
+        }
+        
+        if (textToExport) {
+            const blob = new Blob([textToExport], { type: 'text/plain' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
@@ -1052,6 +1421,8 @@ function setupCanvas() {
     if (zoomMaskCanvas) { zoomMaskCanvas.width = maskCanvas.width; zoomMaskCanvas.height = maskCanvas.height; }
     if (zoomPreviewCanvas) { zoomPreviewCanvas.width = maskCanvas.width; zoomPreviewCanvas.height = maskCanvas.height; }
     if (zoomGuideCanvas) { zoomGuideCanvas.width = maskCanvas.width; zoomGuideCanvas.height = maskCanvas.height; }
+    if (zoomTextCanvas) { zoomTextCanvas.width = maskCanvas.width; zoomTextCanvas.height = maskCanvas.height; }
+    if (mainTextCanvas) { mainTextCanvas.width = maskCanvas.width; mainTextCanvas.height = maskCanvas.height; }
 
     ctx = maskCanvas.getContext('2d');
     previewCtx = maskPreviewCanvas?.getContext('2d') || null;
@@ -1074,6 +1445,7 @@ function setupCanvas() {
     
     // Sync Zoom Mask with Main Mask (Initial)
     if(zoomCtx) zoomCtx.drawImage(maskCanvas, 0, 0);
+    redrawText();
 }
 
 function handleMainImage(file: File) {
@@ -1082,6 +1454,7 @@ function handleMainImage(file: File) {
     reader.onload = async (e) => {
         const result = e.target?.result as string;
         uploadedImageData = { data: result.split(',')[1], mimeType: file.type };
+        updateComparisonImages();
         
         // --- AUTO RATIO DETECTION LOGIC ---
         const imgObj = new Image();
@@ -1383,6 +1756,7 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
             zoomOverlay.classList.remove('hidden');
             setTimeout(() => { zoomOverlay.classList.remove('opacity-0'); }, 10);
             zoomBrushPanel?.classList.remove('hidden');
+            redrawText();
             
             // Show canvas overlays in zoom
             zoomPreviewCanvas?.classList.remove('hidden');
@@ -1403,6 +1777,286 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
     closeZoomBtn?.addEventListener('click', () => {
         zoomOverlay.classList.add('opacity-0');
         setTimeout(() => { zoomOverlay.classList.add('hidden'); }, 300);
+    });
+
+    const downloadZoomedImage = document.querySelector('#download-zoomed-image') as HTMLButtonElement;
+    downloadZoomedImage?.addEventListener('click', () => {
+        if (zoomedImage.src) {
+            const link = document.createElement('a');
+            link.href = zoomedImage.src;
+            link.download = `image-${Date.now()}.png`;
+            link.click();
+        }
+    });
+
+    zoomTextCanvas = document.querySelector('#zoom-text-canvas') as HTMLCanvasElement;
+    zoomTextCtx = zoomTextCanvas.getContext('2d')!;
+    textOverlayInput = document.querySelector('#text-overlay-input') as HTMLInputElement;
+    addTextBtn = document.querySelector('#add-text-btn') as HTMLButtonElement;
+    mainAddTextBtn = document.querySelector('#main-add-text-btn') as HTMLButtonElement;
+    mainTextOverlayInput = document.querySelector('#main-text-overlay-input') as HTMLInputElement;
+    mainTextColorInput = document.querySelector('#main-text-color-input') as HTMLInputElement;
+    mainTextSizeInput = document.querySelector('#main-text-size-input') as HTMLInputElement;
+    mainDeleteTextBtn = document.querySelector('#main-delete-text-btn') as HTMLButtonElement;
+    mainResetTextBtn = document.querySelector('#main-reset-text-btn') as HTMLButtonElement;
+
+    const resetTextBtn = document.querySelector('#reset-text-btn') as HTMLButtonElement;
+    
+    mainResetTextBtn?.addEventListener('click', () => {
+        textElements = [];
+        selectedTextIndex = -1;
+        redrawText();
+    });
+
+    resetTextBtn?.addEventListener('click', () => {
+        textElements = [];
+        selectedTextIndex = -1;
+        redrawText();
+    });
+
+    function toggleAddingTextMode(mode?: boolean) {
+        isAddingTextMode = mode !== undefined ? mode : !isAddingTextMode;
+        if (isAddingTextMode) isTextEraserMode = false;
+        
+        const buttons = [addTextBtn, mainAddTextBtn];
+        const eraserButtons = [eraserTextBtn, mainEraserTextBtn];
+        const canvases = [zoomTextCanvas, mainTextCanvas];
+        const inputs = [textOverlayInput, mainTextOverlayInput];
+
+        buttons.forEach(btn => btn?.classList.toggle('bg-emerald-600', isAddingTextMode));
+        eraserButtons.forEach(btn => btn?.classList.remove('bg-emerald-600'));
+        
+        canvases.forEach(canvas => {
+            if (canvas) {
+                canvas.style.cursor = isAddingTextMode ? 'crosshair' : (isTextEraserMode ? 'not-allowed' : 'default');
+                if (canvas.id === 'main-text-canvas') {
+                    canvas.style.pointerEvents = (isAddingTextMode || isTextEraserMode) ? 'auto' : 'none';
+                }
+            }
+        });
+        
+        if (!isAddingTextMode) {
+            inputs.forEach(input => input?.classList.add('hidden'));
+        }
+    }
+
+    function toggleTextEraserMode(mode?: boolean) {
+        isTextEraserMode = mode !== undefined ? mode : !isTextEraserMode;
+        if (isTextEraserMode) isAddingTextMode = false;
+
+        const buttons = [addTextBtn, mainAddTextBtn];
+        const eraserButtons = [eraserTextBtn, mainEraserTextBtn];
+        const canvases = [zoomTextCanvas, mainTextCanvas];
+
+        eraserButtons.forEach(btn => btn?.classList.toggle('bg-emerald-600', isTextEraserMode));
+        buttons.forEach(btn => btn?.classList.remove('bg-emerald-600'));
+
+        canvases.forEach(canvas => {
+            if (canvas) {
+                canvas.style.cursor = isTextEraserMode ? 'not-allowed' : (isAddingTextMode ? 'crosshair' : 'default');
+                if (canvas.id === 'main-text-canvas') {
+                    canvas.style.pointerEvents = (isAddingTextMode || isTextEraserMode) ? 'auto' : 'none';
+                }
+            }
+        });
+    }
+
+    mainAddTextBtn?.addEventListener('click', () => toggleAddingTextMode());
+    addTextBtn?.addEventListener('click', () => toggleAddingTextMode());
+    mainEraserTextBtn?.addEventListener('click', () => toggleTextEraserMode());
+    eraserTextBtn?.addEventListener('click', () => toggleTextEraserMode());
+
+    const textColorInput = document.querySelector('#text-color-input') as HTMLInputElement;
+    const textSizeInput = document.querySelector('#text-size-input') as HTMLInputElement;
+
+    function saveEditingText() {
+        if (editingTextIndex !== -1 && zoomTextCtx) {
+            const text = textOverlayInput.value || mainTextOverlayInput.value;
+            textElements[editingTextIndex].text = text;
+            textElements[editingTextIndex].color = textColorInput.value || mainTextColorInput.value;
+            textElements[editingTextIndex].size = parseInt(textSizeInput.value || mainTextSizeInput.value) || 20;
+            
+            zoomTextCtx.font = `bold ${textElements[editingTextIndex].size}px Arial`;
+            const metrics = zoomTextCtx.measureText(text);
+            textElements[editingTextIndex].w = Math.max(20, metrics.width);
+            textElements[editingTextIndex].h = textElements[editingTextIndex].size;
+            
+            editingTextIndex = -1;
+            textOverlayInput.value = '';
+            mainTextOverlayInput.value = '';
+            textOverlayInput.classList.add('hidden');
+            textColorInput.classList.add('hidden');
+            textSizeInput.classList.add('hidden');
+            mainTextOverlayInput.classList.add('hidden');
+            mainTextColorInput.classList.add('hidden');
+            mainTextSizeInput.classList.add('hidden');
+            redrawText();
+        }
+    }
+
+    function deleteSelectedText() {
+        if (selectedTextIndex !== -1) {
+            textElements.splice(selectedTextIndex, 1);
+            selectedTextIndex = -1;
+            redrawText();
+        }
+    }
+
+    function attachTextListeners(canvas: HTMLCanvasElement) {
+        if (!canvas) return;
+        canvas.addEventListener('mousedown', (e) => {
+            const { x, y } = getTransformedCanvasCoords(e, canvas);
+
+            const clickedIndex = textElements.findIndex(el => 
+                x >= el.x && x <= el.x + el.w &&
+                y >= el.y && y <= el.y + el.h
+            );
+
+            if (clickedIndex !== -1) {
+                selectedTextIndex = clickedIndex;
+                draggedTextIndex = clickedIndex;
+                dragOffsetX = x - textElements[draggedTextIndex].x;
+                dragOffsetY = y - textElements[draggedTextIndex].y;
+                
+                // Ctrl + Drag to Copy
+                if (e.ctrlKey) {
+                    const el = textElements[draggedTextIndex];
+                    const clone = { ...el };
+                    textElements.push(clone);
+                    draggedTextIndex = textElements.length - 1;
+                    selectedTextIndex = draggedTextIndex;
+                }
+                
+                redrawText();
+                return;
+            }
+
+            selectedTextIndex = -1;
+            if (!isAddingTextMode) {
+                redrawText();
+                return;
+            }
+            
+            // Create new text element
+            const newText = { text: '', x: x, y: y, w: 100, h: 30, color: '#ffffff', size: 20 };
+            textElements.push(newText);
+            editingTextIndex = textElements.length - 1;
+            selectedTextIndex = editingTextIndex;
+            
+            // Show input at screen coordinates
+            const input = canvas.id === 'zoom-text-canvas' ? textOverlayInput : mainTextOverlayInput;
+            const colorInp = canvas.id === 'zoom-text-canvas' ? textColorInput : mainTextColorInput;
+            const sizeInp = canvas.id === 'zoom-text-canvas' ? textSizeInput : mainTextSizeInput;
+
+            if (input && colorInp && sizeInp) {
+                input.style.position = 'fixed';
+                input.style.left = e.clientX + 'px';
+                input.style.top = e.clientY + 'px';
+                input.style.width = '100px';
+                input.classList.remove('hidden');
+                
+                colorInp.style.position = 'fixed';
+                colorInp.style.left = (e.clientX + 105) + 'px';
+                colorInp.style.top = e.clientY + 'px';
+                colorInp.classList.remove('hidden');
+                
+                sizeInp.style.position = 'fixed';
+                sizeInp.style.left = (e.clientX + 140) + 'px';
+                sizeInp.style.top = e.clientY + 'px';
+                sizeInp.classList.remove('hidden');
+                
+                input.focus();
+            }
+            redrawText();
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const { x, y } = getTransformedCanvasCoords(e, canvas);
+
+            if (draggedTextIndex !== -1) {
+                textElements[draggedTextIndex].x = x - dragOffsetX;
+                textElements[draggedTextIndex].y = y - dragOffsetY;
+                redrawText();
+                return;
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            draggedTextIndex = -1;
+        });
+
+        canvas.addEventListener('dblclick', (e) => {
+            const { x, y } = getTransformedCanvasCoords(e, canvas);
+
+            const clickedIndex = textElements.findIndex(el => 
+                x >= el.x && x <= el.x + el.w &&
+                y >= el.y && y <= el.y + el.h
+            );
+
+            if (clickedIndex !== -1) {
+                editingTextIndex = clickedIndex;
+                selectedTextIndex = clickedIndex;
+                
+                const input = canvas.id === 'zoom-text-canvas' ? textOverlayInput : mainTextOverlayInput;
+                const colorInp = canvas.id === 'zoom-text-canvas' ? textColorInput : mainTextColorInput;
+                const sizeInp = canvas.id === 'zoom-text-canvas' ? textSizeInput : mainTextSizeInput;
+
+                input.value = textElements[editingTextIndex].text;
+                colorInp.value = textElements[editingTextIndex].color;
+                sizeInp.value = textElements[editingTextIndex].size.toString();
+                
+                input.style.position = 'fixed';
+                input.style.left = e.clientX + 'px';
+                input.style.top = e.clientY + 'px';
+                input.style.width = Math.max(100, textElements[editingTextIndex].w) + 'px';
+                
+                colorInp.style.position = 'fixed';
+                colorInp.style.left = (e.clientX + Math.max(100, textElements[editingTextIndex].w) + 5) + 'px';
+                colorInp.style.top = e.clientY + 'px';
+                colorInp.classList.remove('hidden');
+                
+                sizeInp.style.position = 'fixed';
+                sizeInp.style.left = (e.clientX + Math.max(100, textElements[editingTextIndex].w) + 40) + 'px';
+                sizeInp.style.top = e.clientY + 'px';
+                sizeInp.classList.remove('hidden');
+                
+                input.classList.remove('hidden');
+                input.focus();
+                redrawText();
+            }
+        });
+    }
+
+    attachTextListeners(zoomTextCanvas);
+    attachTextListeners(mainTextCanvas);
+
+    textOverlayInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') saveEditingText();
+    });
+    mainTextOverlayInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') saveEditingText();
+    });
+
+    textOverlayInput?.addEventListener('blur', (e) => {
+        if (e.relatedTarget === textColorInput || e.relatedTarget === textSizeInput) {
+            return;
+        }
+        saveEditingText();
+    });
+    mainTextOverlayInput?.addEventListener('blur', (e) => {
+        if (e.relatedTarget === mainTextColorInput || e.relatedTarget === mainTextSizeInput) {
+            return;
+        }
+        saveEditingText();
+    });
+
+    deleteTextBtn = document.querySelector('#delete-text-btn') as HTMLButtonElement;
+    deleteTextBtn?.addEventListener('click', deleteSelectedText);
+    mainDeleteTextBtn?.addEventListener('click', deleteSelectedText);
+
+    resetTextBtn.addEventListener('click', () => {
+        textElements = [];
+        redrawText();
     });
     
     const updateZoomNavigation = () => {
@@ -1549,11 +2203,15 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
 document.addEventListener('keydown', (e) => {
     // Undo/Redo Shortcuts
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        const target = e.target as HTMLElement;
+        if (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') return;
         e.preventDefault();
         performUndo();
         return;
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        const target = e.target as HTMLElement;
+        if (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') return;
         e.preventDefault();
         performRedo();
         return;
@@ -1693,6 +2351,417 @@ if (historyLabelContainer) {
     });
 }
 
+// --- PNG Info Viewport Logic ---
+if (pngInfoTabBtn) {
+    pngInfoTabBtn.addEventListener('click', () => {
+        pngInfoViewport.classList.remove('hidden');
+    });
+}
+
+if (pngInfoCloseBtn) {
+    pngInfoCloseBtn.addEventListener('click', () => {
+        pngInfoViewport.classList.add('hidden');
+    });
+}
+
+// Font and Size
+if (pngInfoFontSelect) {
+    pngInfoFontSelect.addEventListener('change', () => {
+        const font = pngInfoFontSelect.value;
+        pngInfoContentTop.style.fontFamily = font;
+        pngInfoContentBottom.style.fontFamily = font;
+    });
+}
+
+if (pngInfoSizeInput) {
+    pngInfoSizeInput.addEventListener('input', () => {
+        const size = pngInfoSizeInput.value + 'px';
+        pngInfoContentTop.style.fontSize = size;
+        pngInfoContentBottom.style.fontSize = size;
+    });
+}
+
+// Download
+if (pngInfoDownloadDataBtn) {
+    pngInfoDownloadDataBtn.addEventListener('click', () => {
+        const text = pngInfoContentTop.innerText;
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'png_info_data.txt';
+        a.click();
+        URL.revokeObjectURL(url);
+    });
+}
+
+const pngInfoDownloadPngBtn = document.querySelector('#png-info-download-png-btn') as HTMLButtonElement;
+if (pngInfoDownloadPngBtn) {
+    pngInfoDownloadPngBtn.addEventListener('click', () => {
+        const text = pngInfoContentTop.innerText;
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const fontSize = parseInt(pngInfoSizeInput.value) || 14;
+        const fontFamily = pngInfoFontSelect.value || 'monospace';
+        
+        ctx.font = `${fontSize}px ${fontFamily}`;
+        const lines = text.split('\n');
+        
+        // Calculate dimensions
+        let maxWidth = 0;
+        lines.forEach(line => {
+            const width = ctx.measureText(line).width;
+            if (width > maxWidth) maxWidth = width;
+        });
+        
+        let contentWidth = maxWidth + 40;
+        let contentHeight = lines.length * (fontSize + 10) + 40;
+        
+        // Force 4:3 aspect ratio
+        const ratio = 4 / 3;
+        
+        // Ensure canvas fits content and matches 4:3 ratio
+        if (contentWidth / contentHeight > ratio) {
+            // Content is wider than 4:3, increase height to fit ratio
+            canvas.width = contentWidth;
+            canvas.height = contentWidth / ratio;
+        } else {
+            // Content is taller than 4:3, increase width to fit ratio
+            canvas.height = contentHeight;
+            canvas.width = contentHeight * ratio;
+        }
+        
+        // Draw
+        ctx.fillStyle = '#121214';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#d1d5db';
+        ctx.font = `${fontSize}px ${fontFamily}`;
+        
+        lines.forEach((line, i) => {
+            ctx.fillText(line, 20, 30 + i * (fontSize + 10));
+        });
+        
+        // In a real app, we would use a library to embed metadata into the PNG blob.
+        // For now, we just download the visual representation.
+        const url = canvas.toDataURL('image/png');
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'png_info.png';
+        a.click();
+    });
+}
+
+// Drag and Drop Helper
+const setupDropZone = (dropZone: HTMLElement, fileInput: HTMLInputElement, contentArea: HTMLDivElement) => {
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', (e) => e.preventDefault());
+    dropZone.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        const file = e.dataTransfer?.files[0];
+        if (!file) return;
+
+        if (file.type === 'text/plain') {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                contentArea.innerText = e.target?.result as string;
+            };
+            reader.readAsText(file);
+        } else if (file.type === 'image/png') {
+            try {
+                const metadata = await exifr.parse(file);
+                const text = JSON.stringify(metadata, null, 2);
+                contentArea.innerText = text;
+            } catch (err) {
+                console.error('Failed to parse PNG metadata', err);
+                contentArea.innerText = 'Failed to load metadata from image.';
+            }
+        }
+    });
+    fileInput.addEventListener('change', async (e) => {
+        const file = (e.target as HTMLInputElement).files?.[0];
+        if (!file) return;
+        if (file.type === 'text/plain') {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                contentArea.innerText = e.target?.result as string;
+            };
+            reader.readAsText(file);
+        } else if (file.type === 'image/png') {
+            try {
+                const metadata = await exifr.parse(file);
+                const text = JSON.stringify(metadata, null, 2);
+                contentArea.innerText = text;
+            } catch (err) {
+                console.error('Failed to parse PNG metadata', err);
+                contentArea.innerText = 'Failed to load metadata from image.';
+            }
+        }
+    });
+};
+
+setupDropZone(pngInfoDropZoneTop, pngInfoFileInputTop, pngInfoContentTop);
+
+const pngInfoDropZoneBottom = document.getElementById('png-info-drop-zone-bottom') as HTMLDivElement;
+const pngInfoFileInputBottom = document.getElementById('png-info-file-input-bottom') as HTMLInputElement;
+setupDropZone(pngInfoDropZoneBottom, pngInfoFileInputBottom, pngInfoContentBottom);
+
+function setupPngInfoViewport(
+    viewport: HTMLDivElement,
+    content: HTMLDivElement,
+    copyBtn: HTMLButtonElement,
+    pasteBtn: HTMLButtonElement,
+    clearBtn: HTMLButtonElement,
+    templateBtn: HTMLButtonElement | null
+) {
+    // Copy
+    if (copyBtn) {
+        copyBtn.addEventListener('click', async () => {
+            const text = content.innerText;
+            if (text && text !== 'Drag a PNG image here to view its metadata...') {
+                const success = await copyToClipboard(text);
+                if (success) {
+                    const originalClass = copyBtn.className;
+                    copyBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>';
+                    copyBtn.className = copyBtn.className.replace('text-blue-400', 'text-emerald-400').replace('border-blue-500/20', 'border-emerald-500/50');
+                    setTimeout(() => {
+                        copyBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>';
+                        copyBtn.className = originalClass;
+                    }, 1000);
+                }
+            }
+        });
+    }
+
+    // Paste (Removed per request)
+    if (pasteBtn) {
+        pasteBtn.style.display = 'none';
+    }
+
+    // Add scroll adjustment for Font and Size
+    let lastScrollTime = 0;
+    function setupScrollAdjust(element: HTMLElement, type: 'select' | 'number') {
+        element.addEventListener('wheel', (e) => {
+            const now = Date.now();
+            if (now - lastScrollTime < 150) return; // Throttle to prevent rapid jumps
+            lastScrollTime = now;
+            
+            e.preventDefault();
+            const delta = e.deltaY > 0 ? -1 : 1;
+
+            if (type === 'select') {
+                const select = element as HTMLSelectElement;
+                let newIndex = select.selectedIndex + (-delta);
+                if (newIndex < 0) newIndex = 0;
+                if (newIndex >= select.options.length) newIndex = select.options.length - 1;
+                select.selectedIndex = newIndex;
+                select.dispatchEvent(new Event('change'));
+            } else if (type === 'number') {
+                const input = element as HTMLInputElement;
+                let val = parseInt(input.value) + delta;
+                const min = parseInt(input.min) || 0;
+                const max = parseInt(input.max) || 100;
+                if (val < min) val = min;
+                if (val > max) val = max;
+                input.value = val.toString();
+                input.dispatchEvent(new Event('input'));
+            }
+        }, { passive: false });
+    }
+
+const fontSelect = document.getElementById('png-info-font-select') as HTMLSelectElement;
+if (fontSelect) setupScrollAdjust(fontSelect, 'select');
+
+const sizeInput = document.getElementById('png-info-size-input') as HTMLInputElement;
+if (sizeInput) setupScrollAdjust(sizeInput, 'number');
+
+// Send To Top
+    const sendTopBtn = document.getElementById('png-info-send-top-btn') as HTMLButtonElement;
+    if (sendTopBtn) {
+        sendTopBtn.addEventListener('click', () => {
+            const contentTop = document.getElementById('png-info-content-top') as HTMLDivElement;
+            if (contentTop && content !== contentTop) {
+                contentTop.innerHTML += (contentTop.innerHTML ? '<br>' : '') + content.innerHTML;
+                content.innerHTML = ''; // Xóa nội dung Viewport dưới
+            }
+        });
+    }
+
+    // Template
+    if (templateBtn) {
+        templateBtn.addEventListener('click', () => {
+            const template = `<span class="text-amber-500">PROMPT (MÔ TẢ):</span>
+Tạo ảnh siêu thực từ hình ảnh tải lên. Giữ nguyên chi tiết và thiết kế từ hình ảnh sketch tham chiếu.
+Photorealistic, ultra detailed, sharp focus, 8k, crisp details, realistic materials, clean edges, precise geometry, global illumination, natural lighting, high detail textures, professional photography --no blurry, low quality, noise, soft focus, distorted, bad texture, artifacts.<br>
+CHI TIẾT: <br>
+<span class="text-amber-500">LIGHTING (ÁNH SÁNG):</span><br>
+<span class="text-amber-500">SCENE (BỐI CẢNH):</span><br>
+<span class="text-amber-500">VIEW (GÓC CHỤP):</span>`;
+            
+            // Replace content with template
+            content.innerHTML = template;
+        });
+
+        // Add Color Buttons
+        const yellowBtn = document.createElement('button');
+        yellowBtn.innerHTML = '<div class="w-4 h-4 bg-yellow-400 rounded-full"></div>';
+        yellowBtn.className = 'p-1 hover:bg-amber-900/40 rounded';
+        yellowBtn.title = 'Set Yellow';
+        yellowBtn.addEventListener('click', () => {
+            document.execCommand('styleWithCSS', false, 'true');
+            document.execCommand('foreColor', false, '#fbbf24'); // yellow-400
+            yellowBtn.classList.add('ring-2', 'ring-white');
+            whiteBtn.classList.remove('ring-2', 'ring-white');
+        });
+        templateBtn.parentElement!.insertBefore(yellowBtn, templateBtn.nextSibling);
+
+        const whiteBtn = document.createElement('button');
+        whiteBtn.innerHTML = '<div class="w-4 h-4 bg-white rounded-full"></div>';
+        whiteBtn.className = 'p-1 hover:bg-amber-900/40 rounded';
+        whiteBtn.title = 'Set White';
+        whiteBtn.addEventListener('click', () => {
+            document.execCommand('styleWithCSS', false, 'true');
+            document.execCommand('foreColor', false, '#ffffff'); // white
+            whiteBtn.classList.add('ring-2', 'ring-white');
+            yellowBtn.classList.remove('ring-2', 'ring-white');
+        });
+        templateBtn.parentElement!.insertBefore(whiteBtn, yellowBtn.nextSibling);
+    }
+
+    // Delete Button
+    const deleteBtn = document.createElement('button');
+    deleteBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>';
+    deleteBtn.className = 'text-red-400 p-1 border border-red-500/20 rounded hover:bg-red-900/40';
+    deleteBtn.title = 'Delete Selected';
+    deleteBtn.addEventListener('click', () => {
+        document.execCommand('delete', false, null);
+    });
+    copyBtn.parentElement!.insertBefore(deleteBtn, copyBtn.nextSibling);
+
+    // Translate Button
+    const translateBtn = document.createElement('button');
+    translateBtn.innerText = 'VN-EN';
+    translateBtn.className = 'text-xs bg-amber-900/20 border border-amber-500/20 text-amber-400 px-2 py-1 rounded hover:bg-amber-900/40';
+    let currentLang: 'VN' | 'EN' = 'VN';
+    translateBtn.addEventListener('click', async () => {
+        translateBtn.innerText = 'Đang dịch...';
+        const html = content.innerHTML;
+        const targetLang = currentLang === 'VN' ? 'EN' : 'VN';
+        content.innerHTML = await translateTextGeneric(html, targetLang);
+        currentLang = targetLang;
+        translateBtn.innerText = currentLang === 'VN' ? 'VN-EN' : 'EN-VN';
+    });
+    viewport.appendChild(translateBtn);
+
+    // Ensure content is editable by default
+    content.setAttribute('contenteditable', 'true');
+    content.classList.add('border-amber-500/50');
+    
+    // Add Undo/Redo support
+    setupUndo(content);
+    
+    // Drag and drop
+    viewport.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); });
+    viewport.addEventListener('drop', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (e.dataTransfer?.files?.[0]) {
+            const file = e.dataTransfer.files[0];
+            if (file.type === 'image/png') {
+                const data = await extractMetadata(file);
+                if (data) {
+                    content.innerHTML = `<span class="text-amber-500">PROMPT:</span> ${(data.mega || '').replace(/&/g, "&amp;").replace(/</g, "&lt;")}<br><span class="text-amber-500">LIGHTING:</span> ${(data.lighting || '').replace(/&/g, "&amp;").replace(/</g, "&lt;")}<br><span class="text-amber-500">SCENE:</span> ${(data.scene || '').replace(/&/g, "&amp;").replace(/</g, "&lt;")}<br><span class="text-amber-500">VIEW:</span> ${(data.view || '').replace(/&/g, "&amp;").replace(/</g, "&lt;")}`;
+                } else {
+                    content.innerText = "No BananaProData metadata found in this image.";
+                }
+            } else {
+                content.innerText = "Please drop a PNG image.";
+            }
+        }
+    });
+
+    // Clear
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            content.innerText = '';
+            // Visual feedback
+            const originalClass = clearBtn.className;
+            clearBtn.className = clearBtn.className.replace('text-blue-400', 'text-emerald-400').replace('border-blue-500/20', 'border-emerald-500/50');
+            setTimeout(() => clearBtn.className = originalClass, 500);
+        });
+    }
+}
+
+if (pngInfoViewportTop) {
+    setupPngInfoViewport(
+        pngInfoViewportTop,
+        pngInfoContentTop,
+        pngInfoCopyBtnTop,
+        pngInfoPasteBtnTop,
+        pngInfoClearBtnTop,
+        pngInfoTemplateBtnTop
+    );
+}
+
+if (pngInfoViewportBottom) {
+    setupPngInfoViewport(
+        pngInfoViewportBottom,
+        pngInfoContentBottom,
+        pngInfoCopyBtnBottom,
+        pngInfoPasteBtnBottom,
+        pngInfoClearBtnBottom,
+        pngInfoTemplateBtnBottom
+    );
+}
+
+if (pngInfoSendBtn) {
+    pngInfoSendBtn.addEventListener('click', () => {
+        pngInfoContentTop.innerHTML += (pngInfoContentTop.innerHTML ? '<br>' : '') + pngInfoContentBottom.innerHTML;
+    });
+}
+
+// Aspect Ratio buttons
+document.querySelectorAll('.png-info-ar-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const ar = btn.getAttribute('data-ar');
+        const isActive = btn.classList.contains('bg-amber-900/40');
+        
+        // Find the parent viewport container
+        const viewport = btn.closest('#png-info-viewport-top, #png-info-viewport-bottom');
+        if (!viewport) return;
+        
+        // Find the content element within the viewport
+        const contentEl = viewport.querySelector('#png-info-content-top, #png-info-content-bottom') as HTMLElement;
+        if (!contentEl) return;
+
+        // Remove active state from all buttons in the same viewport
+        viewport.querySelectorAll('.png-info-ar-btn').forEach(b => {
+            b.classList.remove('bg-amber-900/40', 'border-amber-500/50', 'text-amber-400');
+            b.classList.add('bg-amber-900/20', 'border-amber-500/20', 'text-amber-400');
+        });
+
+        // Remove existing AR line from content
+        let content = contentEl.innerHTML;
+        // More robust regex to remove any existing AR line
+        content = content.replace(/<br><span class="text-amber-500">AR:<\/span> --ar:.*$/g, '').replace(/<br><span class="text-amber-400">AR:<\/span> --ar:.*$/g, '');
+
+        if (isActive) {
+            // Deselected
+            contentEl.innerHTML = content;
+        } else {
+            // Selected
+            btn.classList.remove('bg-amber-900/20', 'border-amber-500/20', 'text-amber-400');
+            btn.classList.add('bg-amber-900/40', 'border-amber-500/50', 'text-amber-400');
+            contentEl.innerHTML = content + `<br><span class="text-amber-400">AR:</span> ${ar}`;
+        }
+        
+        // Visual feedback
+        const originalClass = btn.className;
+        btn.className = btn.className.replace('text-amber-400', 'text-emerald-400').replace('border-amber-500/20', 'border-emerald-500/50');
+        setTimeout(() => btn.className = originalClass, 500);
+    });
+});
+
 // --- PNG Info Logic ---
 if (pngInfoDropZone) {
     pngInfoDropZone.addEventListener('click', () => pngInfoInput?.click());
@@ -1717,6 +2786,28 @@ if (pngInfoInput) {
 }
 
 // --- Paste PNG Info Button (UPDATED to Read JSON Text) ---
+async function applyMetadata(data: any) {
+    // Basic validation to check if it looks like our metadata structure
+    const isPromptData = data && (
+        'mega' in data || 
+        'lighting' in data || 
+        'scene' in data || 
+        'view' in data ||
+        'BananaProData' in data
+    );
+
+    if (isPromptData) {
+        populateMetadata(data);
+        if(statusEl) {
+            statusEl.innerText = "Data Paste Success";
+            setTimeout(() => statusEl.innerText = "System Standby", 2000);
+        }
+    } else {
+        console.warn("Clipboard JSON does not match PromptData structure:", data);
+        showCustomAlert("Clipboard JSON does not match the expected Data PNG Info format.", "Format Error");
+    }
+}
+
 if (pastePngInfoBtn) {
     pastePngInfoBtn.addEventListener('click', async () => {
         try {
@@ -1740,26 +2831,7 @@ if (pastePngInfoBtn) {
             try {
                 // Attempt to parse text as JSON (Data PNG info format)
                 const data = JSON.parse(text);
-                
-                // Basic validation to check if it looks like our metadata structure
-                const isPromptData = data && (
-                    'mega' in data || 
-                    'lighting' in data || 
-                    'scene' in data || 
-                    'view' in data ||
-                    'BananaProData' in data
-                );
-
-                if (isPromptData) {
-                    populateMetadata(data);
-                    if(statusEl) {
-                        statusEl.innerText = "Data Paste Success";
-                        setTimeout(() => statusEl.innerText = "System Standby", 2000);
-                    }
-                } else {
-                    console.warn("Clipboard JSON does not match PromptData structure:", data);
-                    showCustomAlert("Clipboard JSON does not match the expected Data PNG Info format.", "Format Error");
-                }
+                await applyMetadata(data);
             } catch (jsonErr) {
                 console.error("JSON Parse Error", jsonErr);
                 showCustomAlert("Clipboard text is not valid JSON Data.", "Parse Error");
@@ -1869,7 +2941,7 @@ function updateBrushCursor(e: MouseEvent) {
     if (activeTool === 'brush' || activeTool === 'eraser') {
         // Keeps the default CSS styling for circle, remove SVG
          brushCursor.innerHTML = '';
-    } else if (activeTool === 'rect' || activeTool === 'ellipse' || activeTool === 'lasso') {
+    } else if (activeTool === 'rect' || activeTool === 'ellipse' || activeTool === 'lasso' || activeTool === 'polygon') {
          brushCursor.innerHTML = pencilIcon;
     } else if (activeTool === 'arrow') {
          brushCursor.innerHTML = dotIcon;
@@ -1906,7 +2978,7 @@ function getTransformedCanvasCoords(e: MouseEvent, canvas: HTMLCanvasElement) {
     // 1. Mouse relative to viewport
     // 2. Adjust for pan
     // 3. Scale down
-    if (canvas.id === 'zoom-mask-canvas') {
+    if (canvas.id === 'zoom-mask-canvas' || canvas.id === 'zoom-text-canvas') {
          // zoomContentWrapper rect includes transform
          const wrapRect = zoomContentWrapper.getBoundingClientRect();
          const offsetX = e.clientX - wrapRect.left;
@@ -1921,76 +2993,183 @@ function getTransformedCanvasCoords(e: MouseEvent, canvas: HTMLCanvasElement) {
 
 // Unified Draw Logic
 function startDrawing(e: MouseEvent, targetCanvas: HTMLCanvasElement) {
-    const contextToUse = (targetCanvas.id === 'zoom-mask-canvas') ? ctx : ctx; // Always draw to main ctx
-    if (!contextToUse) return;
+    if (!ctx) return;
 
     isDrawing = true;
     const { x, y } = getTransformedCanvasCoords(e, targetCanvas);
     startX = x; startY = y;
 
     if (activeTool === 'brush' || activeTool === 'eraser') {
-        contextToUse.beginPath();
-        contextToUse.globalCompositeOperation = activeTool === 'eraser' ? 'destination-out' : 'source-over';
-        contextToUse.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-        contextToUse.fillStyle = 'rgba(255, 0, 0, 0.8)';
-        contextToUse.moveTo(x, y); contextToUse.lineTo(x, y); contextToUse.stroke();
+        const op = activeTool === 'eraser' ? 'destination-out' : 'source-over';
+        const color = 'rgba(255, 0, 0, 0.8)';
+        
+        ctx.beginPath();
+        ctx.globalCompositeOperation = op;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = currentBrushSize;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.moveTo(x, y); ctx.lineTo(x, y); ctx.stroke();
+        
+        if (zoomCtx) {
+            zoomCtx.beginPath();
+            zoomCtx.globalCompositeOperation = op;
+            zoomCtx.strokeStyle = color;
+            zoomCtx.fillStyle = color;
+            zoomCtx.lineWidth = currentBrushSize;
+            zoomCtx.lineCap = 'round';
+            zoomCtx.lineJoin = 'round';
+            zoomCtx.moveTo(x, y); zoomCtx.lineTo(x, y); zoomCtx.stroke();
+        }
     } else if (activeTool === 'lasso') {
         lassoPoints = [{x, y}];
+        maskPreviewCanvas.classList.remove('hidden');
+        if (zoomPreviewCanvas) zoomPreviewCanvas.classList.remove('hidden');
+    } else if (activeTool === 'rect' || activeTool === 'ellipse' || activeTool === 'arrow') {
+        maskPreviewCanvas.classList.remove('hidden');
+        if (zoomPreviewCanvas) zoomPreviewCanvas.classList.remove('hidden');
+    } else if (activeTool === 'polygon') {
+        // Point-to-Point Polygon logic
+        if (!isDrawingPolygon) {
+            isDrawingPolygon = true;
+            polygonPoints = [{x, y}];
+            maskPreviewCanvas.classList.remove('hidden');
+            if (zoomPreviewCanvas) zoomPreviewCanvas.classList.remove('hidden');
+        } else {
+            // Check if clicking near the first point to close
+            const dist = Math.sqrt(Math.pow(x - polygonPoints[0].x, 2) + Math.pow(y - polygonPoints[0].y, 2));
+            if (dist < 15 && polygonPoints.length > 2) {
+                finishPolygon();
+            } else {
+                polygonPoints.push({x, y});
+            }
+        }
     }
 }
 
-function draw(e: MouseEvent, targetCanvas: HTMLCanvasElement) {
-    if (!isDrawing) return;
-    const { x, y } = getTransformedCanvasCoords(e, targetCanvas);
-    const contextToUse = ctx; // Main ctx
+function finishPolygon() {
+    if (polygonPoints.length < 3) {
+        isDrawingPolygon = false;
+        polygonPoints = [];
+        maskPreviewCanvas.classList.add('hidden');
+        return;
+    }
+    
+    if (ctx) {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
+        ctx.beginPath();
+        ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+        for (let i = 1; i < polygonPoints.length; i++) {
+            ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
+        }
+        ctx.closePath();
+        ctx.fill();
+        
+        // Sync zoom canvas
+        if (zoomCtx) {
+            zoomCtx.clearRect(0, 0, zoomMaskCanvas.width, zoomMaskCanvas.height);
+            zoomCtx.drawImage(maskCanvas, 0, 0);
+        }
+        
+        saveMaskHistory();
+    }
+    
+    isDrawingPolygon = false;
+    polygonPoints = [];
+    if (drawRequest) cancelAnimationFrame(drawRequest);
+    drawRequest = null;
+    maskPreviewCanvas.classList.add('hidden');
+    zoomPreviewCanvas.classList.add('hidden');
+}
 
-    // For preview, decide which canvas to use
-    const pCtx = (targetCanvas.id === 'zoom-mask-canvas') ? zoomPreviewCtx : previewCtx;
-    const pCanvas = (targetCanvas.id === 'zoom-mask-canvas') ? zoomPreviewCanvas : maskPreviewCanvas;
+function draw(e: MouseEvent, targetCanvas: HTMLCanvasElement) {
+    if (isAddingTextMode || (!isDrawing && !isDrawingPolygon)) return;
+    const { x, y } = getTransformedCanvasCoords(e, targetCanvas);
 
     if (activeTool === 'brush' || activeTool === 'eraser') {
-        if(contextToUse) { contextToUse.lineTo(x, y); contextToUse.stroke(); }
-        // If zooming, update zoom canvas visualization too (simple sync)
-        if(targetCanvas.id === 'zoom-mask-canvas' && zoomCtx) {
-             zoomCtx.clearRect(0,0,zoomCtx.canvas.width, zoomCtx.canvas.height);
-             zoomCtx.drawImage(maskCanvas, 0, 0);
+        if (ctx) {
+            ctx.lineTo(x, y);
+            ctx.stroke();
         }
-    } else {
+        if (zoomCtx) {
+            zoomCtx.lineTo(x, y);
+            zoomCtx.stroke();
+        }
+    } else if (activeTool === 'polygon' || activeTool === 'lasso') {
+        // Immediate preview for polygon and lasso for better responsiveness
+        const pCtx = (targetCanvas.id === 'zoom-mask-canvas') ? zoomPreviewCtx : previewCtx;
+        const pCanvas = (targetCanvas.id === 'zoom-mask-canvas') ? zoomPreviewCanvas : maskPreviewCanvas;
         if (!pCtx || !pCanvas) return;
+
         pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
-        pCanvas.classList.remove('hidden');
-
         pCtx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-        pCtx.fillStyle = 'rgba(255, 0, 0, 0.3)';
-        pCtx.lineWidth = activeTool === 'arrow' ? 5 : 2;
+        pCtx.lineWidth = 2;
 
-        if (activeTool === 'rect') {
-            pCtx.fillRect(startX, startY, x - startX, y - startY);
-            pCtx.strokeRect(startX, startY, x - startX, y - startY);
-        } else if (activeTool === 'ellipse') {
+        if (activeTool === 'polygon') {
+            if (!isDrawingPolygon || polygonPoints.length === 0) return;
+            pCtx.fillStyle = 'rgba(255, 0, 0, 0.2)';
             pCtx.beginPath();
-            const radiusX = Math.abs(x - startX) / 2;
-            const radiusY = Math.abs(y - startY) / 2;
-            const centerX = startX + (x - startX) / 2;
-            const centerY = startY + (y - startY) / 2;
-            pCtx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, 2 * Math.PI);
-            pCtx.fill(); pCtx.stroke();
+            pCtx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+            for (let i = 1; i < polygonPoints.length; i++) {
+                pCtx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
+            }
+            pCtx.lineTo(x, y);
+            pCtx.stroke();
+
+            const dist = Math.sqrt(Math.pow(x - polygonPoints[0].x, 2) + Math.pow(y - polygonPoints[0].y, 2));
+            if (dist < 15 && polygonPoints.length > 2) {
+                pCtx.beginPath();
+                pCtx.arc(polygonPoints[0].x, polygonPoints[0].y, 8, 0, Math.PI * 2);
+                pCtx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+                pCtx.fill();
+            }
         } else if (activeTool === 'lasso') {
             lassoPoints.push({x, y});
+            pCtx.fillStyle = 'rgba(255, 0, 0, 0.1)';
             pCtx.beginPath();
             pCtx.moveTo(lassoPoints[0].x, lassoPoints[0].y);
             for (let i = 1; i < lassoPoints.length; i++) pCtx.lineTo(lassoPoints[i].x, lassoPoints[i].y);
-            pCtx.stroke(); pCtx.fillStyle = 'rgba(255, 0, 0, 0.1)'; pCtx.fill();
-        } else if (activeTool === 'arrow') {
-            const headlen = 30; // Increased size
-            const angle = Math.atan2(y - startY, x - startX);
-            pCtx.strokeStyle = 'cyan'; pCtx.lineWidth = 8; // Increased width
-            pCtx.beginPath(); pCtx.moveTo(startX, startY); pCtx.lineTo(x, y); pCtx.stroke();
-            pCtx.beginPath(); pCtx.moveTo(x, y);
-            pCtx.lineTo(x - headlen * Math.cos(angle - Math.PI / 6), y - headlen * Math.sin(angle - Math.PI / 6));
-            pCtx.lineTo(x - headlen * Math.cos(angle + Math.PI / 6), y - headlen * Math.sin(angle + Math.PI / 6));
-            pCtx.lineTo(x, y); pCtx.fillStyle = 'cyan'; pCtx.fill();
+            pCtx.stroke();
+            pCtx.fill();
         }
+    } else {
+        if (drawRequest) cancelAnimationFrame(drawRequest);
+        drawRequest = requestAnimationFrame(() => {
+            // For preview, decide which canvas to use
+            const pCtx = (targetCanvas.id === 'zoom-mask-canvas') ? zoomPreviewCtx : previewCtx;
+            const pCanvas = (targetCanvas.id === 'zoom-mask-canvas') ? zoomPreviewCanvas : maskPreviewCanvas;
+
+            if (!pCtx || !pCanvas) return;
+            pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
+
+            pCtx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
+            pCtx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+            pCtx.lineWidth = activeTool === 'arrow' ? 5 : 2;
+
+            if (activeTool === 'rect') {
+                pCtx.fillRect(startX, startY, x - startX, y - startY);
+                pCtx.strokeRect(startX, startY, x - startX, y - startY);
+            } else if (activeTool === 'ellipse') {
+                pCtx.beginPath();
+                const radiusX = Math.abs(x - startX) / 2;
+                const radiusY = Math.abs(y - startY) / 2;
+                const centerX = startX + (x - startX) / 2;
+                const centerY = startY + (y - startY) / 2;
+                pCtx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, 2 * Math.PI);
+                pCtx.fill(); pCtx.stroke();
+            } else if (activeTool === 'arrow') {
+                const headlen = 30; // Increased size
+                const angle = Math.atan2(y - startY, x - startX);
+                pCtx.strokeStyle = 'cyan'; pCtx.lineWidth = 8; // Increased width
+                pCtx.beginPath(); pCtx.moveTo(startX, startY); pCtx.lineTo(x, y); pCtx.stroke();
+                pCtx.beginPath(); pCtx.moveTo(x, y);
+                pCtx.lineTo(x - headlen * Math.cos(angle - Math.PI / 6), y - headlen * Math.sin(angle - Math.PI / 6));
+                pCtx.lineTo(x - headlen * Math.cos(angle + Math.PI / 6), y - headlen * Math.sin(angle + Math.PI / 6));
+                pCtx.lineTo(x, y); pCtx.fillStyle = 'cyan'; pCtx.fill();
+            }
+        });
     }
 }
 
@@ -2005,6 +3184,9 @@ function stopDrawing(e: MouseEvent, targetCanvas: HTMLCanvasElement) {
 
     if (activeTool === 'brush' || activeTool === 'eraser') {
         if (contextToUse) contextToUse.closePath();
+    } else if (activeTool === 'polygon') {
+        // Polygon is click-based, so stopDrawing (on mouseup) doesn't finish it
+        return;
     } else {
         if (!contextToUse || !pCtx || !pCanvas) return;
         pCanvas.classList.add('hidden');
@@ -2062,6 +3244,9 @@ function stopDrawing(e: MouseEvent, targetCanvas: HTMLCanvasElement) {
         }
     }
     
+    if (drawRequest) cancelAnimationFrame(drawRequest);
+    drawRequest = null;
+    
     // Save history after any drawing operation
     saveMaskHistory();
 }
@@ -2074,20 +3259,27 @@ function attachCanvasListeners(canvas: HTMLCanvasElement) {
     });
     canvas.addEventListener('mousemove', (e) => draw(e, canvas));
     canvas.addEventListener('mouseup', (e) => stopDrawing(e, canvas));
-    canvas.addEventListener('mouseout', (e) => stopDrawing(e, canvas));
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // Disable right-click menu
+    canvas.addEventListener('mouseout', (e) => {
+        if (activeTool !== 'polygon') stopDrawing(e, canvas);
+    });
+    canvas.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (activeTool === 'polygon' && isDrawingPolygon) {
+            finishPolygon();
+        }
+    }); // Disable right-click menu
 }
 
 if (maskCanvas) attachCanvasListeners(maskCanvas);
 if (zoomMaskCanvas) {
-    zoomMaskCanvas.addEventListener('mousedown', (e) => {
-        if (e.button !== 0) return; // Only left click for inpainting
-        startDrawing(e, zoomMaskCanvas);
-    });
-    zoomMaskCanvas.addEventListener('contextmenu', (e) => e.preventDefault()); // Disable right-click menu
-    // Global handlers for drag out
+    attachCanvasListeners(zoomMaskCanvas);
+    
+    // Global handlers for drag out (for drag-based tools)
     window.addEventListener('mousemove', (e) => {
         if(isDrawing && !zoomOverlay.classList.contains('hidden')) {
+             draw(e, zoomMaskCanvas);
+        }
+        if(isDrawingPolygon && !zoomOverlay.classList.contains('hidden') && activeTool === 'polygon') {
              draw(e, zoomMaskCanvas);
         }
     });
@@ -2408,6 +3600,7 @@ async function renderGalleryModal() {
                 zoomedImage.src = item.src;
                 zoomOverlay.classList.remove('hidden');
                 setTimeout(() => zoomOverlay.classList.add('opacity-100'), 10);
+                redrawText();
             }
         });
 
@@ -2431,16 +3624,9 @@ async function renderGalleryModal() {
             if (id) {
                 const item = displayGallery.find(i => i.id === id);
                 if (item && item.metadata) {
-                    // Instead of just populating metadata, we simulate the PNG Info flow
-                    // by setting the JSON text to clipboard and triggering the paste logic
-                    const jsonStr = JSON.stringify(item.metadata);
-                    navigator.clipboard.writeText(jsonStr).then(() => {
-                        document.getElementById('paste-png-info-btn')?.click();
-                        galleryModal?.classList.add('hidden');
-                    }).catch(err => {
-                        console.error("Failed to copy metadata to clipboard for PNG Info", err);
-                        if (statusEl) statusEl.innerText = "Failed to load PNG Info.";
-                    });
+                    // Directly apply metadata without clipboard
+                    applyMetadata(item.metadata);
+                    galleryModal?.classList.add('hidden');
                 } else {
                     if (statusEl) statusEl.innerText = "No metadata found for this image.";
                 }
@@ -2590,22 +3776,25 @@ async function runGeneration() {
 
         // --- MANUAL MODEL SELECTION ---
         const modelSelect = document.querySelector('#model-select') as HTMLSelectElement;
-        const selectedModel = modelSelect?.value || 'gemini-3.1-flash-image-preview';
+        const selectedModel = modelSelect?.value || 'gemini-3-pro-image-preview';
 
         modelId = selectedModel;
         
         // If Pro model selected, enforce Pro checks
         if (modelId === 'gemini-3-pro-image-preview') {
+             if (!isPro) {
+                 console.warn("User selected Pro model but no valid Pro key detected. Attempting anyway (will fallback if fails).");
+             }
+             imageConfig.imageSize = selectedResolution;
+             if(statusEl) statusEl.innerText = `Generating with GEMINI 3 PRO (${selectedResolution})...`;
+        } else if (modelId === 'gemini-3.1-flash-image-preview') {
+             // BANANA PRO
              imageConfig.imageSize = selectedResolution;
              if(statusEl) statusEl.innerText = `Generating with BANANA PRO (${selectedResolution})...`;
-        } else if (modelId === 'gemini-3.1-flash-image-preview') {
-             // Gemini 3 Flash / BANANA 2
-             imageConfig.imageSize = selectedResolution;
-             if(statusEl) statusEl.innerText = `Generating with BANANA 2 (${selectedResolution})...`;
         } else if (modelId.startsWith('imagen')) {
-             // IMAGEN 4
+             // Imagen 4
              delete imageConfig.imageSize;
-             if(statusEl) statusEl.innerText = "Generating with IMAGEN 4...";
+             if(statusEl) statusEl.innerText = "Generating with Imagen 4...";
         } else {
              // Fallback
              delete imageConfig.imageSize;
@@ -2763,47 +3952,66 @@ async function runGeneration() {
                     if(statusEl) statusEl.innerText = `Đang tạo ảnh ${k + 1} / ${imageCount}...`;
 
                     try {
-                        // Gọi API tạo từng ảnh một với cơ chế Retry tích hợp sẵn trong callWithRetry
-                        let result = await callWithRetry(async () => {
-                            if (modelId.startsWith('imagen')) {
-                                return await ai.models.generateImages({
-                                    model: modelId,
-                                    prompt: fullPrompt,
-                                    config: {
-                                        numberOfImages: 1,
-                                        aspectRatio: imageConfig.aspectRatio,
-                                        outputMimeType: 'image/png'
-                                    }
-                                });
-                            } else {
-                                return await ai.models.generateContent({ 
-                                    model: modelId, 
-                                    contents: { parts: parts }, 
-                                    config: { imageConfig: imageConfig } 
-                                });
+                        // Gọi API tạo từng ảnh một với cơ chế Retry cho lỗi 500 (Internal Server Error)
+                        let result = null;
+                        let retries = 0;
+                        const maxRetries = 2;
+                        
+                        while (retries <= maxRetries) {
+                            try {
+                                if (modelId.startsWith('imagen')) {
+                                    result = await ai.models.generateImages({
+                                        model: modelId,
+                                        prompt: fullPrompt,
+                                        config: {
+                                            numberOfImages: 1,
+                                            aspectRatio: imageConfig.aspectRatio,
+                                            outputMimeType: 'image/png'
+                                        }
+                                    });
+                                } else {
+                                    result = await ai.models.generateContent({ 
+                                        model: modelId, 
+                                        contents: { parts: parts }, 
+                                        config: { imageConfig: imageConfig } 
+                                    });
+                                }
+                                break; // Thành công thì thoát vòng lặp retry
+                            } catch (retryErr: any) {
+                                const errStr = retryErr.message || JSON.stringify(retryErr);
+                                const is500 = errStr.includes("500") || errStr.includes("Internal Server Error");
+                                const is503 = errStr.includes("503") || errStr.includes("Service Unavailable") || errStr.includes("high demand");
+                                
+                                if ((is500 || is503) && retries < maxRetries) {
+                                    retries++;
+                                    if(statusEl) statusEl.innerText = `Lỗi Server (${is503 ? '503' : '500'}). Đang thử lại ${retries}/${maxRetries} (chờ 5s)...`;
+                                    await sleep(5000);
+                                    continue;
+                                }
+                                throw retryErr; // Nếu không phải lỗi 500 hoặc hết lượt retry thì quăng lỗi ra ngoài
                             }
-                        }, 10); // Increase retries to 10 for stability during high demand
+                        }
 
                         if (result) results.push(result);
 
                         // Update Cost (Vertex AI / Tier 1 Pricing)
-                        let costPerImg = 0.0007; // Default for Flash/Lite
-                        if (modelId.includes('pro-image') || modelId.includes('imagen')) costPerImg = 0.012;
-                        else if (modelId.includes('3.1-flash-image')) costPerImg = 0.003; // Gemini 3 Flash / BANANA 2
+                        // Estimate: Pro (Ultra) = $0.012, BANANA PRO = $0.003, Banana Free (Flash) = $0.0007
+                        let costPerImg = 0.0007;
+                        if (modelId.includes('pro') || modelId.includes('imagen')) costPerImg = 0.012;
+                        else if (modelId.includes('3.1-flash')) costPerImg = 0.003;
                         
                         // Only track cost if using a Pro/Ultra tier (Tier 1 Billing)
-                        if (isPro) updateCostDisplay(costPerImg);
+                        if (isPro) updateImageCountDisplay(1);
 
                         // Nếu tạo thành công 1 ảnh, cập nhật thanh tiến trình thật
                         const realProgress = Math.floor(((k + 1) / imageCount) * 95);
                         generateProgress.style.width = `${realProgress}%`;
                         generateLabel.innerText = `STOP GENERATING (${realProgress}%)`;
 
-                        // NGHỈ GIỮA CÁC LẦN GỌI ĐỂ BẢO VỆ API KEY (Trừ ảnh cuối cùng)
+                        // NGHỈ 4 GIÂY GIỮA CÁC LẦN GỌI ĐỂ BẢO VỆ API KEY (Trừ ảnh cuối cùng)
                         if (k < imageCount - 1) {
-                            const coolingDelay = 4000 + Math.random() * 2000; // Add jitter
-                            if(statusEl) statusEl.innerText = `Đang làm mát API (chờ ${Math.round(coolingDelay/1000)} giây)...`;
-                            await sleep(coolingDelay); 
+                            if(statusEl) statusEl.innerText = `Đang làm mát API (chờ 4 giây)...`;
+                            await sleep(4000); 
                         }
 
                     } catch (imgErr: any) {
@@ -2851,11 +4059,11 @@ async function runGeneration() {
                     throw e; 
                 }
 
-                // FALLBACK LOGIC for Paid Models (Pro, BANANA 2, and IMAGEN 4) 403/404
-                const isPaidModel = modelId.includes('pro') || 
+                // FALLBACK LOGIC for Paid Models (Pro, BANANA PRO, and Imagen 4) 403/404
+                const isPaidModel = modelId === 'gemini-3-pro-image-preview' || 
                                    modelId === 'gemini-3.1-flash-image-preview' || 
                                    modelId.startsWith('imagen');
-                if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED") || errStr.includes("not found")) && isPaidModel) {
+                if ((errStr.includes("403") || errStr.includes("404") || errStr.includes("PERMISSION_DENIED")) && isPaidModel) {
                      
                      // If manually selected, we still fallback but notify user
                      if (selectedModel === modelId) {
@@ -2891,16 +4099,14 @@ async function runGeneration() {
                          for (let k = 0; k < imageCount; k++) {
                             if (!abortController || abortController.signal.aborted) break;
                             
-                            const fallbackRes = await callWithRetry(() => ai.models.generateContent({ 
+                            fallbackResults.push(await ai.models.generateContent({ 
                                 model: fallbackModelId, 
                                 contents: { parts: parts }, 
                                 config: { imageConfig: fallbackConfig } 
                             }));
                             
-                            fallbackResults.push(fallbackRes);
-                            
                             // Update Cost for Fallback (Flash)
-                            updateCostDisplay(0.0007);
+                            updateImageCountDisplay(1);
                          }
                          
                          if (!abortController || abortController.signal.aborted) return;
@@ -2970,6 +4176,7 @@ function showImage(index: number) {
     if (index < 0 || index >= generatedImages.length) return;
     currentImageIndex = index;
     outputImage.src = generatedImages[index];
+    updateComparisonImages();
     
     // If zoom is open, update zoomed image too
     if (!zoomOverlay.classList.contains('hidden')) {
@@ -3033,9 +4240,51 @@ globalResetBtn?.addEventListener('click', () => {
     referenceImages = []; 
     renderRefs();
 
+    // 6. Reset Text Elements
+    textElements = [];
+    redrawText();
+
     // NOTE: Intentionally NOT calling resetImage() to keep the uploaded image/mask active.
     if(statusEl) statusEl.innerText = "Text/Settings Reset (Image Kept)";
 });
+
+if (modalCopyBtn) {
+    modalCopyBtn.addEventListener('click', async () => {
+        if (customPasteTextarea && customPasteTextarea.value) {
+            await copyToClipboard(customPasteTextarea.value);
+        }
+    });
+}
+if (copyAllBtn) {
+    copyAllBtn.addEventListener('click', async () => {
+        const allManualEntries = document.querySelectorAll('.manual-ctx-entry') as NodeListOf<HTMLTextAreaElement>;
+        let allText = '';
+        allManualEntries.forEach(el => {
+            if (el.value) {
+                allText += el.value + '\n\n';
+            }
+        });
+        if (allText) {
+            copyAllBtn.classList.add('pulse-ring');
+            
+            const success = await copyToClipboard(allText.trim());
+            
+            copyAllBtn.classList.remove('pulse-ring');
+            
+            if (success) {
+                const originalContent = copyAllBtn.innerHTML;
+                copyAllBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg><span class="text-[8px] font-black uppercase tracking-widest">OK</span>';
+                copyAllBtn.style.color = '#4ade80';
+                copyAllBtn.style.borderColor = '#4ade80';
+                setTimeout(() => {
+                    copyAllBtn.innerHTML = originalContent;
+                    copyAllBtn.style.color = '';
+                    copyAllBtn.style.borderColor = '';
+                }, 1000);
+            }
+        }
+    });
+}
 
 // --- Toolbar Buttons Wiring ---
 
@@ -3061,8 +4310,18 @@ toolBtns.forEach(btn => {
         else if (btn.id.includes('rect')) activeTool = 'rect';
         else if (btn.id.includes('ellipse')) activeTool = 'ellipse';
         else if (btn.id.includes('lasso')) activeTool = 'lasso';
+        else if (btn.id.includes('polygon')) {
+            activeTool = 'polygon';
+            polygonPoints = [];
+            isDrawingPolygon = false;
+        }
         else if (btn.id.includes('arrow')) activeTool = 'arrow';
         else if (btn.id.includes('eraser')) activeTool = 'eraser';
+        
+        isAddingTextMode = false;
+        addTextBtn?.classList.remove('bg-emerald-600');
+        if (zoomTextCanvas) zoomTextCanvas.style.cursor = 'default';
+        if (textOverlayInput) textOverlayInput.classList.add('hidden');
         
         if(brushCursor) {
              brushCursor.classList.remove('hidden');
@@ -3110,9 +4369,346 @@ if (brushSlider) {
         if (zoomBrushSizeVal) zoomBrushSizeVal.innerText = brushSizeVal.innerText;
     });
 }
+// --- Comparison Event Listeners ---
+let comparisonZoom = 1;
+let comparisonOffsetX = 0;
+let comparisonOffsetY = 0;
+let isComparePanning = false;
+let compareStartX = 0;
+let compareStartY = 0;
+
+if (compareToggleBtn) {
+    compareToggleBtn.addEventListener('click', () => {
+        isComparisonMode = !isComparisonMode;
+        if (isComparisonMode) {
+            updateComparisonImages();
+            comparisonContainer.classList.remove('hidden');
+            outputContainer.classList.add('hidden');
+            compareToggleBtn.classList.add('bg-[#262380]');
+            compareToggleBtn.classList.remove('bg-white/5');
+            // Reset zoom/pan on open
+            comparisonZoom = 1;
+            comparisonOffsetX = 0;
+            comparisonOffsetY = 0;
+            updateComparisonTransform();
+        } else {
+            comparisonContainer.classList.add('hidden');
+            outputContainer.classList.remove('hidden');
+            compareToggleBtn.classList.remove('bg-[#262380]');
+            compareToggleBtn.classList.add('bg-white/5');
+        }
+    });
+}
+
+function updateComparisonTransform() {
+    const transform = `translate(${comparisonOffsetX}px, ${comparisonOffsetY}px) scale(${comparisonZoom})`;
+    compareImg1.style.transform = transform;
+    compareImg2.style.transform = transform;
+}
+
+comparisonContainer.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    comparisonZoom = Math.min(Math.max(comparisonZoom * delta, 1), 5);
+    updateComparisonTransform();
+}, { passive: false });
+
+comparisonContainer.addEventListener('mousedown', (e) => {
+    if (e.button === 1) { // Middle mouse button
+        isComparePanning = true;
+        compareStartX = e.clientX - comparisonOffsetX;
+        compareStartY = e.clientY - comparisonOffsetY;
+        comparisonContainer.style.cursor = 'grabbing';
+    }
+});
+
+window.addEventListener('mousemove', (e) => {
+    if (isComparePanning) {
+        comparisonOffsetX = e.clientX - compareStartX;
+        comparisonOffsetY = e.clientY - compareStartY;
+        updateComparisonTransform();
+    }
+});
+
+window.addEventListener('mouseup', () => {
+    isComparePanning = false;
+    comparisonContainer.style.cursor = 'default';
+});
+
+if (compareSlider) {
+    compareSlider.addEventListener('input', (e) => {
+        const value = (e.target as HTMLInputElement).value;
+        compareImg2Wrapper.style.width = `${value}%`;
+        const handle = document.getElementById('compare-slider-handle');
+        if (handle) handle.style.left = `${value}%`;
+    });
+}
+
 if (zoomBrushSizeSlider) {
     zoomBrushSizeSlider.addEventListener('input', () => {
         brushSlider.value = zoomBrushSizeSlider.value;
         brushSlider.dispatchEvent(new Event('input'));
     });
 }
+
+// --- Collage Extract Logic ---
+if (collageExtractToggle && collageExtractControls) {
+    collageExtractToggle.addEventListener('change', () => {
+        if (collageExtractToggle.checked) {
+            collageExtractControls.classList.remove('hidden');
+        } else {
+            collageExtractControls.classList.add('hidden');
+        }
+    });
+}
+
+if (collagePositionSelect) {
+    collagePositionSelect.addEventListener('change', () => {
+        const targetPosition = collagePositionSelect.value;
+        const finalPrompt = COLLAGE_EXTRACT_PROMPT_TEMPLATE.replace('[ TARGET POSITION ]', targetPosition);
+        const viewManual = document.getElementById('view-manual') as HTMLTextAreaElement;
+        if (viewManual) {
+            viewManual.value = finalPrompt;
+            
+            // Maintain current state: only auto-resize if NOT collapsed
+            const isCollapsed = viewManual.classList.contains('h-[40px]');
+            if (!isCollapsed) {
+                // Trigger auto-resize if the function exists
+                // @ts-ignore
+                if (typeof autoResize === 'function') autoResize(viewManual);
+            }
+        }
+    });
+}
+
+// --- Viewport Toggle Logic ---
+const toggleViewManualBtn = document.getElementById('toggle-view-manual');
+const expandIcon = document.getElementById('expand-icon');
+const collapseIcon = document.getElementById('collapse-icon');
+const viewManualArea = document.getElementById('view-manual') as HTMLTextAreaElement;
+
+if (toggleViewManualBtn && viewManualArea && expandIcon && collapseIcon) {
+    toggleViewManualBtn.addEventListener('click', () => {
+        // Check if it's currently collapsed (either by class or by explicit height)
+        const isCollapsed = viewManualArea.classList.contains('h-[40px]') || viewManualArea.style.height === '40px';
+        
+        if (isCollapsed) {
+            // Expand
+            viewManualArea.classList.remove('h-[40px]', 'overflow-hidden');
+            viewManualArea.classList.add('h-full', 'min-h-[140px]');
+            viewManualArea.style.height = ''; // Clear inline height to allow auto-resize
+            expandIcon.classList.add('hidden');
+            collapseIcon.classList.remove('hidden');
+            // @ts-ignore
+            if (typeof autoResize === 'function') autoResize(viewManualArea);
+        } else {
+            // Collapse
+            viewManualArea.classList.add('h-[40px]', 'overflow-hidden');
+            viewManualArea.classList.remove('h-full', 'min-h-[140px]');
+            viewManualArea.style.height = '40px'; // Force collapsed height
+            expandIcon.classList.remove('hidden');
+            collapseIcon.classList.add('hidden');
+        }
+    });
+}
+
+if (extractViewBtn) {
+    extractViewBtn.addEventListener('click', runCollageExtraction);
+}
+
+async function runCollageExtraction() {
+    if (!uploadedImageData) {
+        showCustomAlert("Vui lòng tải lên ảnh ghép (collage) trước.", "Image Required");
+        return;
+    }
+
+    if (isGenerating) return;
+
+    try {
+        // Refresh API Key
+        manualApiKey = localStorage.getItem('manualApiKey') || '';
+        let hasSelected = false;
+        if (typeof window.aistudio !== 'undefined' && window.aistudio.hasSelectedApiKey) {
+            hasSelected = await window.aistudio.hasSelectedApiKey();
+        }
+        let finalApiKey = manualApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY;
+        if (hasSelected && process.env.API_KEY) finalApiKey = process.env.API_KEY;
+
+        if (!finalApiKey) {
+            showCustomAlert("Không tìm thấy API Key. Vui lòng nhập API Key trong phần Account.", "API Key Missing");
+            return;
+        }
+
+        const targetPosition = collagePositionSelect.value;
+        const finalPrompt = COLLAGE_EXTRACT_PROMPT_TEMPLATE.replace('[ TARGET POSITION ]', targetPosition);
+
+        isGenerating = true;
+        extractViewBtn.disabled = true;
+        extractViewBtn.innerText = "EXTRACTING...";
+        
+        // Sync with main Generate button UI
+        generateButton.classList.remove('bg-[#262380]');
+        generateButton.classList.add('bg-red-600');
+        generateLabel.innerText = "EXTRACTING (0%)";
+        if (miniGenerateBtn) {
+            miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" /></svg>`;
+            miniGenerateBtn.classList.remove('bg-[#262380]');
+            miniGenerateBtn.classList.add('bg-red-600');
+        }
+
+        if(statusEl) statusEl.innerText = `Đang trích xuất khung hình ${targetPosition}...`;
+
+        // Start progress bar
+        generateProgress.style.width = '0%';
+        let progress = 0;
+        const progressInterval = setInterval(() => {
+            progress += 2;
+            if (progress > 90) progress = 90;
+            generateProgress.style.width = `${progress}%`;
+            generateLabel.innerText = `EXTRACTING (${progress}%)`;
+        }, 100);
+
+        const ai = new GoogleGenAI({ apiKey: finalApiKey });
+        // Use gemini-3.1-flash-image-preview for extraction as it's fast and supports image output
+        const modelId = 'gemini-3.1-flash-image-preview';
+
+        const result = await ai.models.generateContent({
+            model: modelId,
+            contents: {
+                parts: [
+                    { inlineData: { mimeType: uploadedImageData.mimeType, data: uploadedImageData.data } },
+                    { text: finalPrompt }
+                ]
+            },
+            config: {
+                imageConfig: {
+                    imageSize: selectedResolution || '1K',
+                    aspectRatio: sizeSelect.value || '1:1'
+                }
+            }
+        });
+
+        clearInterval(progressInterval);
+        generateProgress.style.width = '100%';
+
+        const cand = result.candidates?.[0];
+        if (cand) {
+            let foundImage = false;
+            for (const part of cand.content.parts) {
+                if (part.inlineData) {
+                    const pngBase64 = await convertToPngBase64(part.inlineData.data, part.inlineData.mimeType);
+                    const promptData: PromptData = { 
+                        mega: `Collage Extract: ${targetPosition}`, 
+                        lighting: '', 
+                        scene: '', 
+                        view: '', 
+                        inpaint: '', 
+                        inpaintEnabled: false, 
+                        cameraProjection: false 
+                    };
+                    const finalBase64 = await embedMetadata(pngBase64, promptData);
+                    const src = `data:image/png;base64,${finalBase64}`;
+                    
+                    generatedImages = [src]; // Replace with extracted image
+                    currentImageIndex = 0;
+                    addToHistory(src, promptData);
+                    
+                    outputContainer.classList.remove('hidden');
+                    showImage(0);
+                    foundImage = true;
+                    break;
+                }
+            }
+            if (!foundImage) {
+                showCustomAlert("AI không trả về hình ảnh trích xuất. Vui lòng thử lại.", "Extraction Failed");
+            }
+        }
+
+        if(statusEl) statusEl.innerText = "Trích xuất hoàn tất.";
+        
+        // Track cost
+        if (!!(manualApiKey && manualApiKey.length > 10) || hasSelected) {
+            updateImageCountDisplay(1); // Banana Pro pricing for Flash
+        }
+
+    } catch (error: any) {
+        console.error("Collage Extraction Error", error);
+        showCustomAlert(`Lỗi trích xuất: ${error.message || "Unknown error"}`, "Error");
+    } finally {
+        isGenerating = false;
+        extractViewBtn.disabled = false;
+        extractViewBtn.innerText = "Extract Now";
+        
+        // Reset main Generate button UI
+        generateButton.classList.add('bg-[#262380]');
+        generateButton.classList.remove('bg-red-600');
+        generateLabel.innerText = "GENERATE (PROCESS)";
+        if (miniGenerateBtn) {
+            miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
+            miniGenerateBtn.classList.add('bg-[#262380]');
+            miniGenerateBtn.classList.remove('bg-red-600');
+        }
+
+        generateProgress.style.width = '0%';
+    }
+}
+
+// --- Custom Scrollbar Logic ---
+function setupCustomScrollbar(wrapperId: string, contentId: string) {
+    const wrapper = document.getElementById(wrapperId);
+    const content = document.getElementById(contentId);
+    if (!wrapper || !content) return;
+
+    const upBtn = wrapper.querySelector('.scrollbar-up') as HTMLElement;
+    const downBtn = wrapper.querySelector('.scrollbar-down') as HTMLElement;
+    const track = wrapper.querySelector('.scrollbar-track') as HTMLElement;
+    const thumb = wrapper.querySelector('.scrollbar-thumb') as HTMLElement;
+
+    if (!upBtn || !downBtn || !track || !thumb) return;
+
+    const updateThumb = () => {
+        const ratio = content.clientHeight / content.scrollHeight;
+        thumb.style.height = `${Math.max(ratio * track.clientHeight, 20)}px`;
+        const scrollRatio = content.scrollTop / (content.scrollHeight - content.clientHeight);
+        thumb.style.top = `${scrollRatio * (track.clientHeight - thumb.clientHeight)}px`;
+    };
+
+    content.addEventListener('scroll', updateThumb);
+    window.addEventListener('resize', updateThumb);
+    updateThumb();
+
+    upBtn.addEventListener('click', () => {
+        content.scrollTop -= 50;
+    });
+
+    downBtn.addEventListener('click', () => {
+        content.scrollTop += 50;
+    });
+
+    let isDragging = false;
+    let startY = 0;
+    let startScrollTop = 0;
+
+    thumb.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        startY = e.clientY;
+        startScrollTop = content.scrollTop;
+        document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const deltaY = e.clientY - startY;
+        const scrollRatio = (content.scrollHeight - content.clientHeight) / (track.clientHeight - thumb.clientHeight);
+        content.scrollTop = startScrollTop + deltaY * scrollRatio;
+    });
+
+    document.addEventListener('mouseup', () => {
+        isDragging = false;
+        document.body.style.userSelect = '';
+    });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    setupCustomScrollbar('png-info-viewport', 'png-info-scroll-wrapper');
+});
