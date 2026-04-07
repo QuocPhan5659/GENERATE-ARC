@@ -38,18 +38,29 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // Global paste listener for PNG Info
   window.addEventListener('paste', async (e) => {
-      // If the user is focusing an input, let them paste normally.
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target instanceof HTMLElement && e.target.isContentEditable)) {
-          return;
-      }
-
       const text = e.clipboardData?.getData('text/plain');
       if (text) {
           try {
-              const data = JSON.parse(text);
-              await applyMetadata(data);
+              const trimmedText = text.trim();
+              if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
+                  const data = JSON.parse(text);
+                  // Check if it's actually our metadata structure
+                  const isPromptData = data && (
+                      'mega' in data || 
+                      'lighting' in data || 
+                      'scene' in data || 
+                      'view' in data ||
+                      'BananaProData' in data
+                  );
+                  
+                  if (isPromptData) {
+                      e.preventDefault();
+                      await applyMetadata(data);
+                      return;
+                  }
+              }
           } catch (jsonErr) {
-              console.warn("Pasted text is not valid JSON Data PNG Info.");
+              // Not JSON, ignore and let default paste happen
           }
       }
   });
@@ -3009,6 +3020,7 @@ if (pngInfoInput) {
 
 // --- Paste PNG Info Button (UPDATED to Read JSON Text) ---
 async function applyMetadata(data: any) {
+    console.log("applyMetadata called with:", data);
     // Basic validation to check if it looks like our metadata structure
     const isPromptData = data && (
         'mega' in data || 
@@ -3040,9 +3052,9 @@ if (pastePngInfoBtn) {
             try {
                 text = await navigator.clipboard.readText();
             } catch (clipErr) {
-                console.warn("Clipboard API failed, falling back to custom paste modal", clipErr);
-                // Only use custom modal if Clipboard API fails
-                text = await showCustomPaste() || "";
+                console.warn("Clipboard API failed", clipErr);
+                showCustomAlert("Clipboard access failed. Please paste directly into the prompt fields.", "Paste Error");
+                return;
             }
 
             if (!text || !text.trim()) {
