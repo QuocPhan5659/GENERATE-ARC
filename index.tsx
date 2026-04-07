@@ -246,7 +246,7 @@ const generateButton = document.querySelector('#generate-button') as HTMLButtonE
 const generateProgress = document.querySelector('#generate-progress') as HTMLDivElement;
 const generateLabel = document.querySelector('#generate-label') as HTMLSpanElement;
 const downloadButtonMain = document.querySelector('#download-button-main') as HTMLButtonElement;
-const downloadUploadBtn = document.querySelector('#download-upload-btn') as HTMLButtonElement;
+const copyUploadBtn = document.querySelector('#copy-upload-btn') as HTMLButtonElement;
 const useAsMasterBtn = document.querySelector('#use-as-master') as HTMLButtonElement;
 const closeOutputBtn = document.querySelector('#close-output-btn') as HTMLButtonElement;
 const globalResetBtn = document.querySelector('#global-reset-btn') as HTMLButtonElement;
@@ -1534,23 +1534,6 @@ function setupCanvas() {
 function handleMainImage(file: File) {
     if (!file.type.startsWith('image/')) return;
     
-    // Extract metadata and populate textareas
-    if (file.type === 'image/png') {
-        extractMetadata(file).then(data => {
-            if (data) {
-                const promptEl = document.getElementById('prompt-manual') as HTMLTextAreaElement;
-                const lightingEl = document.getElementById('lighting-manual') as HTMLTextAreaElement;
-                const sceneEl = document.getElementById('scene-manual') as HTMLTextAreaElement;
-                const viewEl = document.getElementById('view-manual') as HTMLTextAreaElement;
-                
-                if (promptEl) { promptEl.value = data.mega || ''; autoResize(promptEl); }
-                if (lightingEl) { lightingEl.value = data.lighting || ''; autoResize(lightingEl); }
-                if (sceneEl) { sceneEl.value = data.scene || ''; autoResize(sceneEl); }
-                if (viewEl) { viewEl.value = data.view || ''; autoResize(viewEl); }
-            }
-        }).catch(err => console.error("Error extracting metadata on main image upload:", err));
-    }
-
     const reader = new FileReader();
     reader.onload = async (e) => {
         const result = e.target?.result as string;
@@ -1987,6 +1970,8 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
         
         if (!isAddingTextMode) {
             inputs.forEach(input => input?.classList.add('hidden'));
+            selectedTextIndex = -1;
+            redrawText();
         }
     }
 
@@ -4461,40 +4446,56 @@ if (nextImageBtn) nextImageBtn.addEventListener('click', () => showImage(current
 closeOutputBtn?.addEventListener('click', () => { outputContainer.classList.add('hidden'); });
 downloadButtonMain?.addEventListener('click', () => { if (outputImage.src) { const a = document.createElement('a'); a.href = outputImage.src; a.download = `banana-pro-${Date.now()}.png`; a.click(); } });
 
-downloadUploadBtn?.addEventListener('click', () => {
+copyUploadBtn?.addEventListener('click', async () => {
     if (!uploadPreview.src) return;
     
-    const canvas = document.createElement('canvas');
-    canvas.width = uploadPreview.naturalWidth;
-    canvas.height = uploadPreview.naturalHeight;
-    const exportCtx = canvas.getContext('2d');
-    if (!exportCtx) return;
-
-    // 1. Draw original image
-    exportCtx.drawImage(uploadPreview, 0, 0);
-
-    // 2. Draw mask/drawing
-    if (guideCanvas) {
-        exportCtx.drawImage(guideCanvas, 0, 0);
+    try {
+        const canvas = document.createElement('canvas');
+        canvas.width = uploadPreview.naturalWidth;
+        canvas.height = uploadPreview.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        
+        // Draw background (white if transparent)
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.drawImage(uploadPreview, 0, 0);
+        
+        // Draw mask/drawing
+        if (guideCanvas) {
+            ctx.drawImage(guideCanvas, 0, 0);
+        }
+        
+        if (maskCanvas) {
+            ctx.globalAlpha = 0.9;
+            ctx.globalCompositeOperation = 'screen';
+            ctx.drawImage(maskCanvas, 0, 0);
+            ctx.globalAlpha = 1.0;
+            ctx.globalCompositeOperation = 'source-over';
+        }
+        
+        // Draw text
+        if (mainTextCanvas) {
+            ctx.drawImage(mainTextCanvas, 0, 0);
+        }
+        
+        canvas.toBlob(async (blob) => {
+            if (!blob) return;
+            try {
+                await navigator.clipboard.write([
+                    new ClipboardItem({ 'image/png': blob })
+                ]);
+                showCustomAlert("Image copied to clipboard!", "SUCCESS");
+            } catch (err) {
+                console.error('Failed to copy image: ', err);
+                showCustomAlert("Failed to copy image.", "ERROR");
+            }
+        }, 'image/png');
+    } catch (err) {
+        console.error('Failed to prepare image for copy: ', err);
+        showCustomAlert("Failed to prepare image.", "ERROR");
     }
-    
-    if (maskCanvas) {
-        exportCtx.globalAlpha = 0.9;
-        exportCtx.globalCompositeOperation = 'screen';
-        exportCtx.drawImage(maskCanvas, 0, 0);
-        exportCtx.globalAlpha = 1.0;
-        exportCtx.globalCompositeOperation = 'source-over';
-    }
-
-    // 3. Draw text
-    if (mainTextCanvas) {
-        exportCtx.drawImage(mainTextCanvas, 0, 0);
-    }
-
-    const a = document.createElement('a');
-    a.href = canvas.toDataURL('image/png');
-    a.download = `banana-pro-upload-${Date.now()}.png`;
-    a.click();
 });
 
 globalResetBtn?.addEventListener('click', () => {
