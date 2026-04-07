@@ -4475,13 +4475,13 @@ copyUploadBtn?.addEventListener('click', async () => {
         canvas.toBlob(async (blob) => {
             if (!blob) return;
             
-            // Try SketchUp native copy first if available
-            if (window.sketchup && typeof (window.sketchup as any).copy_image === 'function') {
+            // Try SketchUp native save first if available
+            if (window.sketchup && typeof (window.sketchup as any).save_image === 'function') {
                 const reader = new FileReader();
                 reader.onloadend = () => {
                     const base64data = reader.result as string;
-                    (window.sketchup as any).copy_image(base64data);
-                    showCustomAlert("Image copied to SketchUp!", "SUCCESS");
+                    (window.sketchup as any).save_image(base64data, `banana-pro-${Date.now()}.png`);
+                    showCustomAlert("Image saved to SketchUp!", "SUCCESS");
                 };
                 reader.readAsDataURL(blob);
                 return;
