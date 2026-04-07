@@ -35,6 +35,24 @@ document.addEventListener("DOMContentLoaded", function () {
       }
   };
   applyPulseEffect();
+
+  // Global paste listener for PNG Info
+  window.addEventListener('paste', async (e) => {
+      // If the user is focusing an input, let them paste normally.
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target instanceof HTMLElement && e.target.isContentEditable)) {
+          return;
+      }
+
+      const text = e.clipboardData?.getData('text/plain');
+      if (text) {
+          try {
+              const data = JSON.parse(text);
+              await applyMetadata(data);
+          } catch (jsonErr) {
+              console.warn("Pasted text is not valid JSON Data PNG Info.");
+          }
+      }
+  });
 });
 
 interface PromptData {
@@ -67,8 +85,12 @@ let abortController: AbortController | null = null;
 let currentProgressInterval: any = null;
 
 // --- Undo/Redo State ---
-let maskHistory: ImageData[] = [];
-let maskHistoryStep = -1;
+type CanvasState = {
+    mask: ImageData | null;
+    text: Array<{ text: string, x: number, y: number, w: number, h: number, color: string, size: number }>;
+};
+let canvasHistory: CanvasState[] = [];
+let canvasHistoryStep = -1;
 const MAX_HISTORY = 30;
 
 // --- Canvas Contexts ---
@@ -106,9 +128,12 @@ let dragOffsetX = 0;
 let dragOffsetY = 0;
 let textElements: Array<{ text: string, x: number, y: number, w: number, h: number, color: string, size: number }> = [];
 let draggedTextIndex = -1;
+let isTextDragged = false;
 let editingTextIndex = -1;
 let selectedTextIndex = -1;
 let isCopying = false;
+let toggleAddingTextMode: (mode?: boolean) => void = () => {};
+let toggleTextEraserMode: (mode?: boolean) => void = () => {};
 
 function redrawText() {
     if (!zoomTextCtx || !mainTextCtx || !zoomTextCanvas || !mainTextCanvas) return;
@@ -210,11 +235,13 @@ const generateButton = document.querySelector('#generate-button') as HTMLButtonE
 const generateProgress = document.querySelector('#generate-progress') as HTMLDivElement;
 const generateLabel = document.querySelector('#generate-label') as HTMLSpanElement;
 const downloadButtonMain = document.querySelector('#download-button-main') as HTMLButtonElement;
+const downloadUploadBtn = document.querySelector('#download-upload-btn') as HTMLButtonElement;
 const useAsMasterBtn = document.querySelector('#use-as-master') as HTMLButtonElement;
 const closeOutputBtn = document.querySelector('#close-output-btn') as HTMLButtonElement;
 const globalResetBtn = document.querySelector('#global-reset-btn') as HTMLButtonElement;
 const historyList = document.querySelector('#history-list') as HTMLDivElement;
 const miniGenerateBtn = document.querySelector('#mini-generate-btn') as HTMLButtonElement;
+const zoomGenerateBtn = document.querySelector('#zoom-generate-btn') as HTMLButtonElement;
 
 // Image Count & Navigation
 const countBtns = document.querySelectorAll('.count-btn') as NodeListOf<HTMLButtonElement>;
@@ -1366,43 +1393,88 @@ if (inpaintingPromptToggle && inpaintingPromptText) {
 // --- Main Image Handling ---
 
 // Undo/Redo Functions
-function saveMaskHistory() {
+function saveCanvasHistory() {
     if (!ctx || !maskCanvas) return;
-    maskHistoryStep++;
+    canvasHistoryStep++;
     // If we're not at the end of the array, discard the future states
-    if (maskHistoryStep < maskHistory.length) {
-         maskHistory.length = maskHistoryStep; 
+    if (canvasHistoryStep < canvasHistory.length) {
+         canvasHistory.length = canvasHistoryStep; 
     }
-    maskHistory.push(ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height));
-    if (maskHistory.length > MAX_HISTORY) {
-        maskHistory.shift();
-        maskHistoryStep--;
+    canvasHistory.push({
+        mask: ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height),
+        text: JSON.parse(JSON.stringify(textElements))
+    });
+    if (canvasHistory.length > MAX_HISTORY) {
+        canvasHistory.shift();
+        canvasHistoryStep--;
     }
 }
 
 function performUndo() {
-    if (maskHistoryStep > 0) {
-        maskHistoryStep--;
-        const imgData = maskHistory[maskHistoryStep];
-        ctx?.putImageData(imgData, 0, 0);
+    if (canvasHistoryStep > 0) {
+        canvasHistoryStep--;
+        const state = canvasHistory[canvasHistoryStep];
+        if (state.mask) ctx?.putImageData(state.mask, 0, 0);
+        textElements = JSON.parse(JSON.stringify(state.text));
+        
+        editingTextIndex = -1;
+        selectedTextIndex = -1;
+        draggedTextIndex = -1;
+        
+        const textOverlayInput = document.querySelector('#text-overlay-input') as HTMLInputElement;
+        const textColorInput = document.querySelector('#text-color-input') as HTMLInputElement;
+        const textSizeInput = document.querySelector('#text-size-input') as HTMLInputElement;
+        const mainTextOverlayInput = document.querySelector('#main-text-overlay-input') as HTMLInputElement;
+        const mainTextColorInput = document.querySelector('#main-text-color-input') as HTMLInputElement;
+        const mainTextSizeInput = document.querySelector('#main-text-size-input') as HTMLInputElement;
+        
+        textOverlayInput?.classList.add('hidden');
+        textColorInput?.classList.add('hidden');
+        textSizeInput?.classList.add('hidden');
+        mainTextOverlayInput?.classList.add('hidden');
+        mainTextColorInput?.classList.add('hidden');
+        mainTextSizeInput?.classList.add('hidden');
+
         // Sync Zoom
          if(zoomCtx && maskCanvas) {
              zoomCtx.clearRect(0,0, zoomMaskCanvas.width, zoomMaskCanvas.height);
              zoomCtx.drawImage(maskCanvas, 0, 0);
         }
+        redrawText();
     }
 }
 
 function performRedo() {
-    if (maskHistoryStep < maskHistory.length - 1) {
-        maskHistoryStep++;
-        const imgData = maskHistory[maskHistoryStep];
-        ctx?.putImageData(imgData, 0, 0);
+    if (canvasHistoryStep < canvasHistory.length - 1) {
+        canvasHistoryStep++;
+        const state = canvasHistory[canvasHistoryStep];
+        if (state.mask) ctx?.putImageData(state.mask, 0, 0);
+        textElements = JSON.parse(JSON.stringify(state.text));
+        
+        editingTextIndex = -1;
+        selectedTextIndex = -1;
+        draggedTextIndex = -1;
+        
+        const textOverlayInput = document.querySelector('#text-overlay-input') as HTMLInputElement;
+        const textColorInput = document.querySelector('#text-color-input') as HTMLInputElement;
+        const textSizeInput = document.querySelector('#text-size-input') as HTMLInputElement;
+        const mainTextOverlayInput = document.querySelector('#main-text-overlay-input') as HTMLInputElement;
+        const mainTextColorInput = document.querySelector('#main-text-color-input') as HTMLInputElement;
+        const mainTextSizeInput = document.querySelector('#main-text-size-input') as HTMLInputElement;
+        
+        textOverlayInput?.classList.add('hidden');
+        textColorInput?.classList.add('hidden');
+        textSizeInput?.classList.add('hidden');
+        mainTextOverlayInput?.classList.add('hidden');
+        mainTextColorInput?.classList.add('hidden');
+        mainTextSizeInput?.classList.add('hidden');
+
         // Sync Zoom
          if(zoomCtx && maskCanvas) {
              zoomCtx.clearRect(0,0, zoomMaskCanvas.width, zoomMaskCanvas.height);
              zoomCtx.drawImage(maskCanvas, 0, 0);
         }
+        redrawText();
     }
 }
 
@@ -1438,9 +1510,9 @@ function setupCanvas() {
         ctx.lineWidth = currentBrushSize; 
         
         // Reset History
-        maskHistory = [];
-        maskHistoryStep = -1;
-        saveMaskHistory(); // Save initial blank state
+        canvasHistory = [];
+        canvasHistoryStep = -1;
+        saveCanvasHistory(); // Save initial blank state
     }
     
     // Sync Zoom Mask with Main Mask (Initial)
@@ -1450,6 +1522,24 @@ function setupCanvas() {
 
 function handleMainImage(file: File) {
     if (!file.type.startsWith('image/')) return;
+    
+    // Extract metadata and populate textareas
+    if (file.type === 'image/png') {
+        extractMetadata(file).then(data => {
+            if (data) {
+                const promptEl = document.getElementById('prompt-manual') as HTMLTextAreaElement;
+                const lightingEl = document.getElementById('lighting-manual') as HTMLTextAreaElement;
+                const sceneEl = document.getElementById('scene-manual') as HTMLTextAreaElement;
+                const viewEl = document.getElementById('view-manual') as HTMLTextAreaElement;
+                
+                if (promptEl) { promptEl.value = data.mega || ''; autoResize(promptEl); }
+                if (lightingEl) { lightingEl.value = data.lighting || ''; autoResize(lightingEl); }
+                if (sceneEl) { sceneEl.value = data.scene || ''; autoResize(sceneEl); }
+                if (viewEl) { viewEl.value = data.view || ''; autoResize(viewEl); }
+            }
+        }).catch(err => console.error("Error extracting metadata on main image upload:", err));
+    }
+
     const reader = new FileReader();
     reader.onload = async (e) => {
         const result = e.target?.result as string;
@@ -1557,8 +1647,8 @@ function resetImage() {
     imageInput.value = '';
     
     // Reset History
-    maskHistory = [];
-    maskHistoryStep = -1;
+    canvasHistory = [];
+    canvasHistoryStep = -1;
 }
 removeImageBtn?.addEventListener('click', (e) => { e.stopPropagation(); resetImage(); });
 removeImageOverlayBtn?.addEventListener('click', (e) => { e.stopPropagation(); resetImage(); });
@@ -1781,12 +1871,39 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
 
     const downloadZoomedImage = document.querySelector('#download-zoomed-image') as HTMLButtonElement;
     downloadZoomedImage?.addEventListener('click', () => {
-        if (zoomedImage.src) {
-            const link = document.createElement('a');
-            link.href = zoomedImage.src;
-            link.download = `image-${Date.now()}.png`;
-            link.click();
+        if (!zoomedImage.src) return;
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = zoomedImage.naturalWidth;
+        canvas.height = zoomedImage.naturalHeight;
+        const exportCtx = canvas.getContext('2d');
+        if (!exportCtx) return;
+
+        // 1. Draw original image
+        exportCtx.drawImage(zoomedImage, 0, 0);
+
+        // 2. Draw mask/drawing
+        if (zoomGuideCanvas && !zoomGuideCanvas.classList.contains('hidden')) {
+            exportCtx.drawImage(zoomGuideCanvas, 0, 0);
         }
+        
+        if (zoomMaskCanvas && !zoomMaskCanvas.classList.contains('hidden')) {
+            exportCtx.globalAlpha = 0.9;
+            exportCtx.globalCompositeOperation = 'screen';
+            exportCtx.drawImage(zoomMaskCanvas, 0, 0);
+            exportCtx.globalAlpha = 1.0;
+            exportCtx.globalCompositeOperation = 'source-over';
+        }
+
+        // 3. Draw text
+        if (zoomTextCanvas && !zoomTextCanvas.classList.contains('hidden')) {
+            exportCtx.drawImage(zoomTextCanvas, 0, 0);
+        }
+
+        const link = document.createElement('a');
+        link.href = canvas.toDataURL('image/png');
+        link.download = `banana-pro-zoom-${Date.now()}.png`;
+        link.click();
     });
 
     zoomTextCanvas = document.querySelector('#zoom-text-canvas') as HTMLCanvasElement;
@@ -1812,26 +1929,48 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
         textElements = [];
         selectedTextIndex = -1;
         redrawText();
+        saveCanvasHistory();
     });
 
-    function toggleAddingTextMode(mode?: boolean) {
+    toggleAddingTextMode = function(mode?: boolean) {
         isAddingTextMode = mode !== undefined ? mode : !isAddingTextMode;
-        if (isAddingTextMode) isTextEraserMode = false;
+        if (isAddingTextMode) {
+            isTextEraserMode = false;
+            // Deselect drawing tools
+            toolBtns.forEach(b => { b.classList.remove('active', 'bg-[#262380]', 'text-white'); b.classList.add('text-gray-400'); });
+            const zoomBtns = document.querySelectorAll('#zoom-brush-panel .tool-btn');
+            zoomBtns.forEach(zb => { zb.classList.remove('active', 'bg-[#262380]', 'text-white'); zb.classList.add('bg-white/5', 'text-gray-500'); });
+            activeTool = '';
+            if (brushCursor) brushCursor.classList.add('hidden');
+        }
         
         const buttons = [addTextBtn, mainAddTextBtn];
         const eraserButtons = [eraserTextBtn, mainEraserTextBtn];
         const canvases = [zoomTextCanvas, mainTextCanvas];
         const inputs = [textOverlayInput, mainTextOverlayInput];
 
-        buttons.forEach(btn => btn?.classList.toggle('bg-emerald-600', isAddingTextMode));
-        eraserButtons.forEach(btn => btn?.classList.remove('bg-emerald-600'));
+        buttons.forEach(btn => {
+            if (btn) {
+                if (isAddingTextMode) {
+                    btn.classList.add('bg-orange-600');
+                    btn.classList.remove('bg-[#262380]');
+                } else {
+                    btn.classList.remove('bg-orange-600');
+                    btn.classList.add('bg-[#262380]');
+                }
+            }
+        });
+        eraserButtons.forEach(btn => {
+            if (btn) {
+                btn.classList.remove('bg-orange-600');
+                btn.classList.add('bg-[#262380]');
+            }
+        });
         
         canvases.forEach(canvas => {
             if (canvas) {
                 canvas.style.cursor = isAddingTextMode ? 'crosshair' : (isTextEraserMode ? 'not-allowed' : 'default');
-                if (canvas.id === 'main-text-canvas') {
-                    canvas.style.pointerEvents = (isAddingTextMode || isTextEraserMode) ? 'auto' : 'none';
-                }
+                canvas.style.pointerEvents = (isAddingTextMode || isTextEraserMode) ? 'auto' : 'none';
             }
         });
         
@@ -1840,23 +1979,44 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
         }
     }
 
-    function toggleTextEraserMode(mode?: boolean) {
+    toggleTextEraserMode = function(mode?: boolean) {
         isTextEraserMode = mode !== undefined ? mode : !isTextEraserMode;
-        if (isTextEraserMode) isAddingTextMode = false;
+        if (isTextEraserMode) {
+            isAddingTextMode = false;
+            // Deselect drawing tools
+            toolBtns.forEach(b => { b.classList.remove('active', 'bg-[#262380]', 'text-white'); b.classList.add('text-gray-400'); });
+            const zoomBtns = document.querySelectorAll('#zoom-brush-panel .tool-btn');
+            zoomBtns.forEach(zb => { zb.classList.remove('active', 'bg-[#262380]', 'text-white'); zb.classList.add('bg-white/5', 'text-gray-500'); });
+            activeTool = '';
+            if (brushCursor) brushCursor.classList.add('hidden');
+        }
 
         const buttons = [addTextBtn, mainAddTextBtn];
         const eraserButtons = [eraserTextBtn, mainEraserTextBtn];
         const canvases = [zoomTextCanvas, mainTextCanvas];
 
-        eraserButtons.forEach(btn => btn?.classList.toggle('bg-emerald-600', isTextEraserMode));
-        buttons.forEach(btn => btn?.classList.remove('bg-emerald-600'));
+        eraserButtons.forEach(btn => {
+            if (btn) {
+                if (isTextEraserMode) {
+                    btn.classList.add('bg-orange-600');
+                    btn.classList.remove('bg-[#262380]');
+                } else {
+                    btn.classList.remove('bg-orange-600');
+                    btn.classList.add('bg-[#262380]');
+                }
+            }
+        });
+        buttons.forEach(btn => {
+            if (btn) {
+                btn.classList.remove('bg-orange-600');
+                btn.classList.add('bg-[#262380]');
+            }
+        });
 
         canvases.forEach(canvas => {
             if (canvas) {
                 canvas.style.cursor = isTextEraserMode ? 'not-allowed' : (isAddingTextMode ? 'crosshair' : 'default');
-                if (canvas.id === 'main-text-canvas') {
-                    canvas.style.pointerEvents = (isAddingTextMode || isTextEraserMode) ? 'auto' : 'none';
-                }
+                canvas.style.pointerEvents = (isAddingTextMode || isTextEraserMode) ? 'auto' : 'none';
             }
         });
     }
@@ -1869,28 +2029,54 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
     const textColorInput = document.querySelector('#text-color-input') as HTMLInputElement;
     const textSizeInput = document.querySelector('#text-size-input') as HTMLInputElement;
 
+    [textColorInput, mainTextColorInput].forEach(input => {
+        input?.addEventListener('input', (e) => {
+            if (editingTextIndex !== -1 && textElements[editingTextIndex]) {
+                textElements[editingTextIndex].color = (e.target as HTMLInputElement).value;
+                redrawText();
+            }
+        });
+    });
+
+    [textSizeInput, mainTextSizeInput].forEach(input => {
+        input?.addEventListener('input', (e) => {
+            if (editingTextIndex !== -1 && textElements[editingTextIndex]) {
+                textElements[editingTextIndex].size = parseInt((e.target as HTMLInputElement).value) || 20;
+                redrawText();
+            }
+        });
+    });
+
     function saveEditingText() {
         if (editingTextIndex !== -1 && zoomTextCtx) {
-            const text = textOverlayInput.value || mainTextOverlayInput.value;
-            textElements[editingTextIndex].text = text;
-            textElements[editingTextIndex].color = textColorInput.value || mainTextColorInput.value;
-            textElements[editingTextIndex].size = parseInt(textSizeInput.value || mainTextSizeInput.value) || 20;
-            
-            zoomTextCtx.font = `bold ${textElements[editingTextIndex].size}px Arial`;
-            const metrics = zoomTextCtx.measureText(text);
-            textElements[editingTextIndex].w = Math.max(20, metrics.width);
-            textElements[editingTextIndex].h = textElements[editingTextIndex].size;
+            const isZoom = !textOverlayInput?.classList.contains('hidden');
+            const input = isZoom ? textOverlayInput : mainTextOverlayInput;
+            const colorInp = isZoom ? textColorInput : mainTextColorInput;
+            const sizeInp = isZoom ? textSizeInput : mainTextSizeInput;
+
+            if (input && colorInp && sizeInp) {
+                textElements[editingTextIndex].text = input.value;
+                textElements[editingTextIndex].color = colorInp.value;
+                textElements[editingTextIndex].size = parseInt(sizeInp.value) || 20;
+                
+                zoomTextCtx.font = `bold ${textElements[editingTextIndex].size}px Arial`;
+                const metrics = zoomTextCtx.measureText(input.value);
+                textElements[editingTextIndex].w = Math.max(20, metrics.width);
+                textElements[editingTextIndex].h = textElements[editingTextIndex].size;
+            }
             
             editingTextIndex = -1;
-            textOverlayInput.value = '';
-            mainTextOverlayInput.value = '';
-            textOverlayInput.classList.add('hidden');
-            textColorInput.classList.add('hidden');
-            textSizeInput.classList.add('hidden');
-            mainTextOverlayInput.classList.add('hidden');
-            mainTextColorInput.classList.add('hidden');
-            mainTextSizeInput.classList.add('hidden');
+            if (textOverlayInput) textOverlayInput.value = '';
+            if (mainTextOverlayInput) mainTextOverlayInput.value = '';
+            
+            textOverlayInput?.classList.add('hidden');
+            textColorInput?.classList.add('hidden');
+            textSizeInput?.classList.add('hidden');
+            mainTextOverlayInput?.classList.add('hidden');
+            mainTextColorInput?.classList.add('hidden');
+            mainTextSizeInput?.classList.add('hidden');
             redrawText();
+            saveCanvasHistory();
         }
     }
 
@@ -1899,6 +2085,7 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
             textElements.splice(selectedTextIndex, 1);
             selectedTextIndex = -1;
             redrawText();
+            saveCanvasHistory();
         }
     }
 
@@ -1913,6 +2100,22 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
             );
 
             if (clickedIndex !== -1) {
+                if (isTextEraserMode) {
+                    textElements.splice(clickedIndex, 1);
+                    selectedTextIndex = -1;
+                    draggedTextIndex = -1;
+                    editingTextIndex = -1;
+                    textOverlayInput?.classList.add('hidden');
+                    mainTextOverlayInput?.classList.add('hidden');
+                    textColorInput?.classList.add('hidden');
+                    textSizeInput?.classList.add('hidden');
+                    mainTextColorInput?.classList.add('hidden');
+                    mainTextSizeInput?.classList.add('hidden');
+                    redrawText();
+                    saveCanvasHistory();
+                    return;
+                }
+
                 selectedTextIndex = clickedIndex;
                 draggedTextIndex = clickedIndex;
                 dragOffsetX = x - textElements[draggedTextIndex].x;
@@ -1925,6 +2128,7 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
                     textElements.push(clone);
                     draggedTextIndex = textElements.length - 1;
                     selectedTextIndex = draggedTextIndex;
+                    saveCanvasHistory();
                 }
                 
                 redrawText();
@@ -1949,6 +2153,10 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
             const sizeInp = canvas.id === 'zoom-text-canvas' ? textSizeInput : mainTextSizeInput;
 
             if (input && colorInp && sizeInp) {
+                input.value = '';
+                colorInp.value = '#ffffff';
+                sizeInp.value = '20';
+                
                 input.style.position = 'fixed';
                 input.style.left = e.clientX + 'px';
                 input.style.top = e.clientY + 'px';
@@ -1974,6 +2182,7 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
             const { x, y } = getTransformedCanvasCoords(e, canvas);
 
             if (draggedTextIndex !== -1) {
+                isTextDragged = true;
                 textElements[draggedTextIndex].x = x - dragOffsetX;
                 textElements[draggedTextIndex].y = y - dragOffsetY;
                 redrawText();
@@ -1982,7 +2191,13 @@ if (zoomMasterBtn && zoomOverlay && zoomedImage && uploadPreview) {
         });
 
         canvas.addEventListener('mouseup', () => {
-            draggedTextIndex = -1;
+            if (draggedTextIndex !== -1) {
+                if (isTextDragged) {
+                    saveCanvasHistory();
+                    isTextDragged = false;
+                }
+                draggedTextIndex = -1;
+            }
         });
 
         canvas.addEventListener('dblclick', (e) => {
@@ -2239,6 +2454,13 @@ document.addEventListener('keydown', (e) => {
     if (e.altKey && e.key.toLowerCase() === 'v') {
         e.preventDefault();
         document.getElementById('paste-png-info-btn')?.click();
+        return;
+    }
+
+    // Add Text Shortcut
+    if (e.key.toLowerCase() === 't') {
+        e.preventDefault();
+        mainAddTextBtn?.click();
         return;
     }
 
@@ -2830,11 +3052,15 @@ if (pastePngInfoBtn) {
 
             try {
                 // Attempt to parse text as JSON (Data PNG info format)
+                const trimmedText = text.trim();
+                if (!trimmedText.startsWith('{') && !trimmedText.startsWith('[')) {
+                    throw new Error("Not JSON");
+                }
                 const data = JSON.parse(text);
                 await applyMetadata(data);
             } catch (jsonErr) {
-                console.error("JSON Parse Error", jsonErr);
-                showCustomAlert("Clipboard text is not valid JSON Data.", "Parse Error");
+                console.warn("Clipboard text is not valid JSON Data.", jsonErr);
+                showCustomAlert("The pasted text is not valid JSON. Please ensure you are pasting the correct Data PNG Info.", "Invalid Format");
             }
         } catch (err) {
             console.error("Failed to read clipboard", err);
@@ -3073,7 +3299,7 @@ function finishPolygon() {
             zoomCtx.drawImage(maskCanvas, 0, 0);
         }
         
-        saveMaskHistory();
+        saveCanvasHistory();
     }
     
     isDrawingPolygon = false;
@@ -3248,7 +3474,7 @@ function stopDrawing(e: MouseEvent, targetCanvas: HTMLCanvasElement) {
     drawRequest = null;
     
     // Save history after any drawing operation
-    saveMaskHistory();
+    saveCanvasHistory();
 }
 
 // Attach listeners
@@ -3739,6 +3965,10 @@ async function runGeneration() {
                  miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 group-hover:animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
                  miniGenerateBtn.classList.remove('bg-red-600'); miniGenerateBtn.classList.add('bg-[#262380]');
             }
+            if (zoomGenerateBtn) {
+                 zoomGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 group-hover:animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
+                 zoomGenerateBtn.classList.remove('bg-red-600'); zoomGenerateBtn.classList.add('bg-[#262380]');
+            }
             if(statusEl) statusEl.innerText = "Generation Stopped"; 
             return;
         }
@@ -3807,6 +4037,10 @@ async function runGeneration() {
         if (miniGenerateBtn) {
             miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" /></svg>`;
             miniGenerateBtn.classList.remove('bg-[#262380]'); miniGenerateBtn.classList.add('bg-red-600');
+        }
+        if (zoomGenerateBtn) {
+            zoomGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" /></svg>`;
+            zoomGenerateBtn.classList.remove('bg-[#262380]'); zoomGenerateBtn.classList.add('bg-red-600');
         }
         generateProgress.style.width = '0%'; let progressVal = 0;
         
@@ -4157,6 +4391,11 @@ async function runGeneration() {
                  miniGenerateBtn.classList.remove('bg-red-600'); 
                  miniGenerateBtn.classList.add('bg-[#262380]');
             }
+            if (zoomGenerateBtn) {
+                 zoomGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 group-hover:animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
+                 zoomGenerateBtn.classList.remove('bg-red-600'); 
+                 zoomGenerateBtn.classList.add('bg-[#262380]');
+            }
             
             if(statusEl && !abortController?.signal.aborted) {
                 statusEl.innerText = "System Standby"; 
@@ -4171,6 +4410,7 @@ async function runGeneration() {
 
 generateButton?.addEventListener('click', runGeneration);
 miniGenerateBtn?.addEventListener('click', runGeneration);
+zoomGenerateBtn?.addEventListener('click', runGeneration);
 
 function showImage(index: number) {
     if (index < 0 || index >= generatedImages.length) return;
@@ -4208,6 +4448,43 @@ if (nextImageBtn) nextImageBtn.addEventListener('click', () => showImage(current
 
 closeOutputBtn?.addEventListener('click', () => { outputContainer.classList.add('hidden'); });
 downloadButtonMain?.addEventListener('click', () => { if (outputImage.src) { const a = document.createElement('a'); a.href = outputImage.src; a.download = `banana-pro-${Date.now()}.png`; a.click(); } });
+
+downloadUploadBtn?.addEventListener('click', () => {
+    if (!uploadPreview.src) return;
+    
+    const canvas = document.createElement('canvas');
+    canvas.width = uploadPreview.naturalWidth;
+    canvas.height = uploadPreview.naturalHeight;
+    const exportCtx = canvas.getContext('2d');
+    if (!exportCtx) return;
+
+    // 1. Draw original image
+    exportCtx.drawImage(uploadPreview, 0, 0);
+
+    // 2. Draw mask/drawing
+    if (guideCanvas) {
+        exportCtx.drawImage(guideCanvas, 0, 0);
+    }
+    
+    if (maskCanvas) {
+        exportCtx.globalAlpha = 0.9;
+        exportCtx.globalCompositeOperation = 'screen';
+        exportCtx.drawImage(maskCanvas, 0, 0);
+        exportCtx.globalAlpha = 1.0;
+        exportCtx.globalCompositeOperation = 'source-over';
+    }
+
+    // 3. Draw text
+    if (mainTextCanvas) {
+        exportCtx.drawImage(mainTextCanvas, 0, 0);
+    }
+
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = `banana-pro-upload-${Date.now()}.png`;
+    a.click();
+});
+
 globalResetBtn?.addEventListener('click', () => {
     // 1. Reset Text Inputs
     if(promptEl) promptEl.value = ''; 
@@ -4243,6 +4520,7 @@ globalResetBtn?.addEventListener('click', () => {
     // 6. Reset Text Elements
     textElements = [];
     redrawText();
+    saveCanvasHistory();
 
     // NOTE: Intentionally NOT calling resetImage() to keep the uploaded image/mask active.
     if(statusEl) statusEl.innerText = "Text/Settings Reset (Image Kept)";
@@ -4293,7 +4571,7 @@ if (clearMaskBtn) clearMaskBtn.addEventListener('click', () => {
     zoomCtx?.clearRect(0, 0, zoomMaskCanvas.width, zoomMaskCanvas.height); 
     
     // Save history after clear
-    saveMaskHistory();
+    saveCanvasHistory();
 });
 if (toolbarClearBtn) toolbarClearBtn.addEventListener('click', () => clearMaskBtn.click());
 document.getElementById('clear-arrows-btn')?.addEventListener('click', () => {
@@ -4318,10 +4596,8 @@ toolBtns.forEach(btn => {
         else if (btn.id.includes('arrow')) activeTool = 'arrow';
         else if (btn.id.includes('eraser')) activeTool = 'eraser';
         
-        isAddingTextMode = false;
-        addTextBtn?.classList.remove('bg-emerald-600');
-        if (zoomTextCanvas) zoomTextCanvas.style.cursor = 'default';
-        if (textOverlayInput) textOverlayInput.classList.add('hidden');
+        if (isAddingTextMode) toggleAddingTextMode(false);
+        if (isTextEraserMode) toggleTextEraserMode(false);
         
         if(brushCursor) {
              brushCursor.classList.remove('hidden');
@@ -4555,6 +4831,11 @@ async function runCollageExtraction() {
             miniGenerateBtn.classList.remove('bg-[#262380]');
             miniGenerateBtn.classList.add('bg-red-600');
         }
+        if (zoomGenerateBtn) {
+            zoomGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" /></svg>`;
+            zoomGenerateBtn.classList.remove('bg-[#262380]');
+            zoomGenerateBtn.classList.add('bg-red-600');
+        }
 
         if(statusEl) statusEl.innerText = `Đang trích xuất khung hình ${targetPosition}...`;
 
@@ -4647,6 +4928,11 @@ async function runCollageExtraction() {
             miniGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
             miniGenerateBtn.classList.add('bg-[#262380]');
             miniGenerateBtn.classList.remove('bg-red-600');
+        }
+        if (zoomGenerateBtn) {
+            zoomGenerateBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>`;
+            zoomGenerateBtn.classList.add('bg-[#262380]');
+            zoomGenerateBtn.classList.remove('bg-red-600');
         }
 
         generateProgress.style.width = '0%';
