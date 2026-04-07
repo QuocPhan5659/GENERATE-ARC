@@ -4474,6 +4474,19 @@ copyUploadBtn?.addEventListener('click', async () => {
         
         canvas.toBlob(async (blob) => {
             if (!blob) return;
+            
+            // Try SketchUp native copy first if available
+            if (window.sketchup && typeof (window.sketchup as any).copy_image === 'function') {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const base64data = reader.result as string;
+                    (window.sketchup as any).copy_image(base64data);
+                    showCustomAlert("Image copied to SketchUp!", "SUCCESS");
+                };
+                reader.readAsDataURL(blob);
+                return;
+            }
+
             try {
                 await navigator.clipboard.write([
                     new ClipboardItem({ 'image/png': blob })
