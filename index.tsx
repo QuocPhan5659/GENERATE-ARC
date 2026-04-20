@@ -627,17 +627,17 @@ if (sendToGeminiBtn) {
         const safePrompt = promptData.length > 2000 ? promptData.substring(0, 2000) + "..." : promptData;
         const geminiUrl = `https://gemini.google.com/app?q=${encodeURIComponent(safePrompt)}`;
 
-        const skp = (window as any).sketchup;
-        if (skp && typeof skp.open_gemini === 'function') {
+        if (window && (window as any).sketchup) {
             try {
-                skp.open_gemini(geminiUrl);
-                return; // SketchUp handled it
+                // Ép buộc gọi lệnh SketchUp nội bộ
+                (window as any).sketchup.open_gemini(geminiUrl);
+                return; 
             } catch (err) {
-                console.warn("SketchUp Bridge Gemini failed:", err);
+                console.error("[SketchUp Bridge] Gemini Call Error:", err);
             }
         }
 
-        // Browser Fallback
+        // Browser Fallback (Chỉ chạy khi không ở trong SketchUp)
         const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
         const popup = window.open(geminiUrl, "GoogleGeminiPopup", popupFeatures);
         if (popup) popup.focus();
@@ -4130,17 +4130,17 @@ if (sendToFlowBtn) {
         const safePrompt = promptData.length > 2000 ? promptData.substring(0, 2000) : promptData;
         const flowUrl = `https://labs.google/fx/vi/tools/flow?q=${encodeURIComponent(safePrompt)}&prompt=${encodeURIComponent(safePrompt)}&ar=${encodeURIComponent(ar)}`;
         
-        const skp = (window as any).sketchup;
-        if (skp && typeof skp.open_flow === 'function') {
+        if (window && (window as any).sketchup) {
             try {
-                skp.open_flow(flowUrl);
+                // Ép buộc gọi lệnh SketchUp nội bộ
+                (window as any).sketchup.open_flow(flowUrl);
                 return; 
             } catch (err) {
-                console.warn("SketchUp Bridge Flow failed:", err);
+                console.error("[SketchUp Bridge] Flow Call Error:", err);
             }
         }
 
-        // Browser Fallback
+        // Browser Fallback (Chỉ chạy khi không ở trong SketchUp)
         const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
         const popup = window.open(flowUrl, "GoogleFlowPopup", popupFeatures);
         if (popup) popup.focus();
