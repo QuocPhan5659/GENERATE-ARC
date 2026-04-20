@@ -627,10 +627,19 @@ if (sendToGeminiBtn) {
         const safePrompt = promptData.length > 2000 ? promptData.substring(0, 2000) + "..." : promptData;
         const geminiUrl = `https://gemini.google.com/app?q=${encodeURIComponent(safePrompt)}`;
 
-        if (typeof (window as any).sketchup !== 'undefined') {
-            // Priority 1: Use SketchUp's direct app call
-            (window as any).sketchup.open_gemini(geminiUrl);
+        const skp = (window as any).sketchup;
+        if (typeof skp !== 'undefined' && skp.open_gemini) {
+            console.log("SketchUp: Calling open_gemini...");
+            try {
+                skp.open_gemini(geminiUrl);
+            } catch (err) {
+                console.error("SketchUp Callback Error (Gemini):", err);
+                // Fallback if callback exists but fails
+                const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
+                window.open(geminiUrl, "GoogleGeminiPopup", popupFeatures);
+            }
         } else {
+            console.log("Browser: Opening Gemini normally");
             const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
             const popup = window.open(geminiUrl, "GoogleGeminiPopup", popupFeatures);
             if (popup) popup.focus();
@@ -4126,10 +4135,18 @@ if (sendToFlowBtn) {
         const safePrompt = promptData.length > 2000 ? promptData.substring(0, 2000) : promptData;
         const flowUrl = `https://labs.google/fx/vi/tools/flow?q=${encodeURIComponent(safePrompt)}&prompt=${encodeURIComponent(safePrompt)}&ar=${encodeURIComponent(ar)}`;
         
-        if (typeof (window as any).sketchup !== 'undefined') {
-            // Priority 1: Use SketchUp's direct app call
-            (window as any).sketchup.open_flow(flowUrl);
+        const skp = (window as any).sketchup;
+        if (typeof skp !== 'undefined' && skp.open_flow) {
+            console.log("SketchUp: Calling open_flow...");
+            try {
+                skp.open_flow(flowUrl);
+            } catch (err) {
+                console.error("SketchUp Callback Error (Flow):", err);
+                const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
+                window.open(flowUrl, "GoogleFlowPopup", popupFeatures);
+            }
         } else {
+            console.log("Browser: Opening Flow normally");
             const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
             const popup = window.open(flowUrl, "GoogleFlowPopup", popupFeatures);
             if (popup) popup.focus();

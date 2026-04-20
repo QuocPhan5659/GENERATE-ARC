@@ -54,7 +54,11 @@
       }
       
       if (window.sketchup.dialog_ready) {
-        window.sketchup.dialog_ready();
+        try {
+          window.sketchup.dialog_ready();
+        } catch (e) {
+          console.warn("SketchUp dialog_ready exists but failed to execute.");
+        }
       }
     }
   }
