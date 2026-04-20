@@ -623,24 +623,21 @@ if (sendToGeminiBtn) {
             await navigator.clipboard.writeText(promptData);
         }
 
-        // 3. Open Gemini Web App in a separate app-like window with prompt
+        // 3. Open Gemini Web App
         const safePrompt = promptData.length > 2000 ? promptData.substring(0, 2000) + "..." : promptData;
         const geminiUrl = `https://gemini.google.com/app?q=${encodeURIComponent(safePrompt)}`;
 
         const skp = (window as any).sketchup;
-        if (skp) {
-            console.log("%c[SketchUp Bridge] Attempting to call open_gemini", "color: #10b981; font-weight: bold;");
+        if (skp && typeof skp.open_gemini === 'function') {
             try {
-                // We call it directly. If the callback doesn't exist on the Ruby side,
-                // it might throw an error which we catch.
                 skp.open_gemini(geminiUrl);
-                return; // Stop here, SketchUp will handle opening the dialog
+                return; // SketchUp handled it
             } catch (err) {
-                console.warn("[SketchUp Bridge] Gemini callback failed, falling back to browser.", err);
+                console.warn("SketchUp Bridge Gemini failed:", err);
             }
         }
 
-        // Fallback for browser or if SketchUp call failed
+        // Browser Fallback
         const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
         const popup = window.open(geminiUrl, "GoogleGeminiPopup", popupFeatures);
         if (popup) popup.focus();
@@ -4134,17 +4131,16 @@ if (sendToFlowBtn) {
         const flowUrl = `https://labs.google/fx/vi/tools/flow?q=${encodeURIComponent(safePrompt)}&prompt=${encodeURIComponent(safePrompt)}&ar=${encodeURIComponent(ar)}`;
         
         const skp = (window as any).sketchup;
-        if (skp) {
-            console.log("%c[SketchUp Bridge] Attempting to call open_flow", "color: #10b981; font-weight: bold;");
+        if (skp && typeof skp.open_flow === 'function') {
             try {
                 skp.open_flow(flowUrl);
-                return; // Stop here, SketchUp logic takes over
+                return; 
             } catch (err) {
-                console.warn("[SketchUp Bridge] Flow callback failed, falling back to browser.", err);
+                console.warn("SketchUp Bridge Flow failed:", err);
             }
         }
 
-        // Fallback or Normal Browser mode
+        // Browser Fallback
         const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
         const popup = window.open(flowUrl, "GoogleFlowPopup", popupFeatures);
         if (popup) popup.focus();
