@@ -628,22 +628,22 @@ if (sendToGeminiBtn) {
         const geminiUrl = `https://gemini.google.com/app?q=${encodeURIComponent(safePrompt)}`;
 
         const skp = (window as any).sketchup;
-        if (typeof skp !== 'undefined' && skp.open_gemini) {
-            console.log("SketchUp: Calling open_gemini...");
+        if (skp) {
+            console.log("%c[SketchUp Bridge] Attempting to call open_gemini", "color: #10b981; font-weight: bold;");
             try {
+                // We call it directly. If the callback doesn't exist on the Ruby side,
+                // it might throw an error which we catch.
                 skp.open_gemini(geminiUrl);
+                return; // Stop here, SketchUp will handle opening the dialog
             } catch (err) {
-                console.error("SketchUp Callback Error (Gemini):", err);
-                // Fallback if callback exists but fails
-                const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
-                window.open(geminiUrl, "GoogleGeminiPopup", popupFeatures);
+                console.warn("[SketchUp Bridge] Gemini callback failed, falling back to browser.", err);
             }
-        } else {
-            console.log("Browser: Opening Gemini normally");
-            const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
-            const popup = window.open(geminiUrl, "GoogleGeminiPopup", popupFeatures);
-            if (popup) popup.focus();
         }
+
+        // Fallback for browser or if SketchUp call failed
+        const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
+        const popup = window.open(geminiUrl, "GoogleGeminiPopup", popupFeatures);
+        if (popup) popup.focus();
     });
 }
 function showBatchReplace(): Promise<{find: string, replace: string, inc: string} | null> {
@@ -4130,27 +4130,24 @@ if (sendToFlowBtn) {
         }
 
         // 3. Open/Navigate Flow Tool
-        // Using a named window 'GoogleFlowPopup' and navigating directly to ensure the prompt is passed.
-        // Increased safety truncation to 2000 chars to satisfy both user need for length and URL safety.
         const safePrompt = promptData.length > 2000 ? promptData.substring(0, 2000) : promptData;
         const flowUrl = `https://labs.google/fx/vi/tools/flow?q=${encodeURIComponent(safePrompt)}&prompt=${encodeURIComponent(safePrompt)}&ar=${encodeURIComponent(ar)}`;
         
         const skp = (window as any).sketchup;
-        if (typeof skp !== 'undefined' && skp.open_flow) {
-            console.log("SketchUp: Calling open_flow...");
+        if (skp) {
+            console.log("%c[SketchUp Bridge] Attempting to call open_flow", "color: #10b981; font-weight: bold;");
             try {
                 skp.open_flow(flowUrl);
+                return; // Stop here, SketchUp logic takes over
             } catch (err) {
-                console.error("SketchUp Callback Error (Flow):", err);
-                const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
-                window.open(flowUrl, "GoogleFlowPopup", popupFeatures);
+                console.warn("[SketchUp Bridge] Flow callback failed, falling back to browser.", err);
             }
-        } else {
-            console.log("Browser: Opening Flow normally");
-            const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
-            const popup = window.open(flowUrl, "GoogleFlowPopup", popupFeatures);
-            if (popup) popup.focus();
         }
+
+        // Fallback or Normal Browser mode
+        const popupFeatures = "width=1200,height=800,popup=yes,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes";
+        const popup = window.open(flowUrl, "GoogleFlowPopup", popupFeatures);
+        if (popup) popup.focus();
     });
 }
 
